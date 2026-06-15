@@ -275,6 +275,23 @@ impl Device {
             .map_err(|_| AppError::Database)?;
         Ok(())
     }
+
+    pub async fn clear_twofactor_remember_by_user(
+        db: &crate::db::Db,
+        user_id: &str,
+    ) -> Result<(), AppError> {
+        d1_query!(
+            db,
+            "UPDATE devices SET twofactor_remember = NULL, updated_at = ?1 WHERE user_id = ?2",
+            db::now_string(),
+            user_id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+        Ok(())
+    }
 }
 
 fn generate_refresh_token() -> Result<String, AppError> {

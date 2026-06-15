@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Multipart, Path, State},
+    http::HeaderMap,
     Extension, Json,
 };
 use chrono::{TimeZone, Utc};
@@ -16,6 +17,7 @@ use crate::d1_query;
 
 use crate::{
     auth::{Claims, JWT_VALIDATION_LEEWAY_SECS},
+    client_context::request_ip_from_headers,
     db,
     error::AppError,
     handlers::attachments::{
@@ -227,6 +229,24 @@ async fn resolve_creator_identifier(db: &crate::db::Db, send: &SendDB) -> Option
         .ok()
         .flatten()
         .map(|r| r.email)
+}
+
+fn send_password_rate_limit_key(send_id: &str, ip: &str) -> String {
+    format!("send-password:{send_id}:{ip}")
+}
+
+async fn enforce_rate_limit(env: &Env, key: String) -> Result<(), AppError> {
+    if let Ok(rate_limiter) = env.rate_limiter("LOGIN_RATE_LIMITER") {
+        if let Ok(outcome) = rate_limiter.limit(key).await {
+            if !outcome.success {
+                return Err(AppError::TooManyRequests(
+                    "Too many requests. Please try again later.".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── GET /api/sends ──────────────────────────────────────────────────
@@ -701,6 +721,7 @@ pub struct SendAccessRequest {
 #[worker::send]
 pub async fn access_send(
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(access_id): Path<String>,
     Json(payload): Json<SendAccessRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -712,6 +733,12 @@ pub async fn access_send(
     send.validate_access()?;
 
     if send.has_password() {
+        enforce_rate_limit(
+            &env,
+            send_password_rate_limit_key(&send.id, &request_ip_from_headers(&headers)),
+        )
+        .await?;
+
         let pw = payload
             .password
             .as_deref()
@@ -750,12 +777,13 @@ pub async fn access_send(
 #[worker::send]
 pub async fn access_file_send(
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path((send_id, file_id)): Path<(String, String)>,
     Extension(BaseUrl(base_url)): Extension<BaseUrl>,
     Json(payload): Json<SendAccessRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
-    let mut send = SendDB::find_by_id(&db, &send_id)
+    let send = SendDB::find_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound(SEND_INACCESSIBLE_MSG.into()))?;
 
@@ -764,8 +792,17 @@ pub async fn access_file_send(
     if send.send_type != SendType::File as i32 {
         return Err(AppError::NotFound(SEND_INACCESSIBLE_MSG.into()));
     }
+    if !send.matches_file_id(&file_id) {
+        return Err(AppError::NotFound(SEND_INACCESSIBLE_MSG.into()));
+    }
 
     if send.has_password() {
+        enforce_rate_limit(
+            &env,
+            send_password_rate_limit_key(&send.id, &request_ip_from_headers(&headers)),
+        )
+        .await?;
+
         let pw = payload
             .password
             .as_deref()
@@ -774,18 +811,6 @@ pub async fn access_file_send(
             return Err(AppError::BadRequest("Invalid password".into()));
         }
     }
-
-    send.increment_access_count(&db).await?;
-    db::touch_user_updated_at(&db, &send.user_id, &send.updated_at).await?;
-
-    notifications::publish_send_update(
-        (*env).clone(),
-        send.user_id,
-        UpdateType::SyncSendUpdate,
-        send.id,
-        send.updated_at,
-        None,
-    );
 
     let token = build_download_token(&env, &send_id, &file_id)?;
     let url = format!("{base_url}/api/sends/{send_id}/{file_id}?t={token}");

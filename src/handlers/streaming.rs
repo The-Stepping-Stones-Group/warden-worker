@@ -294,11 +294,33 @@ async fn handle_send_download(
         return Err(AppError::NotFound("Not found".into()));
     }
 
-    let send = SendDB::find_by_id(&db, send_id)
+    let mut send = SendDB::find_by_id(&db, send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Not found".into()))?;
+    send.validate_access()
+        .map_err(|_| AppError::NotFound("Not found".into()))?;
+    if !send.matches_file_id(file_id) {
+        log::warn!("Send download file id mismatch: send={send_id} file={file_id}");
+        return Err(AppError::NotFound("Not found".into()));
+    }
 
-    let storage_key = format!("sends/{send_id}/{file_id}");
+    send.increment_access_count(&db)
+        .await
+        .map_err(|_| AppError::NotFound("Not found".into()))?;
+    db::touch_user_updated_at(&db, &send.user_id, &send.updated_at).await?;
+
+    notifications::publish_send_update(
+        env.clone(),
+        send.user_id.clone(),
+        UpdateType::SyncSendUpdate,
+        send.id.clone(),
+        send.updated_at.clone(),
+        None,
+    );
+
+    let storage_key = send
+        .storage_key()
+        .ok_or_else(|| AppError::NotFound("Not found".into()))?;
     let fallback_size: Option<i64> = serde_json::from_str::<serde_json::Value>(&send.data)
         .ok()
         .and_then(|v| v.get("size").and_then(|s| s.as_i64()));
@@ -390,10 +412,6 @@ async fn stream_download_from_storage(
                 .map_err(AppError::Worker)?
                 .ok_or_else(|| AppError::NotFound("Not found in storage".into()))?;
 
-            let ct = obj
-                .http_metadata()
-                .content_type
-                .unwrap_or_else(|| "application/octet-stream".into());
             let size = obj.size();
             let body = obj
                 .body()
@@ -401,11 +419,12 @@ async fn stream_download_from_storage(
                 .response_body()
                 .map_err(AppError::Worker)?;
 
-            let resp = Response::builder()
-                .with_status(200)
-                .with_header("content-type", &ct)?
-                .with_header("content-length", &size.to_string())?
-                .body(body);
+            let stored_ct = obj.http_metadata().content_type;
+            let mut builder = Response::builder().with_status(200);
+            for (name, value) in safe_download_headers(stored_ct.as_deref(), Some(size as i64)) {
+                builder = builder.with_header(name, &value)?;
+            }
+            let resp = builder.body(body);
             Ok(resp)
         }
         StorageBackend::KV => {
@@ -421,19 +440,15 @@ async fn stream_download_from_storage(
 
             let stream = stream.ok_or_else(|| AppError::NotFound("Not found in storage".into()))?;
 
-            let ct = metadata
+            let stored_ct = metadata
                 .as_ref()
                 .and_then(|m| m.content_type.clone())
                 .unwrap_or_else(|| "application/octet-stream".into());
             let size = metadata.as_ref().map(|m| m.file_size).or(fallback_size);
 
-            let mut builder = Response::builder()
-                .with_status(200)
-                .with_header("content-type", &ct)?;
-            if let Some(s) = size {
-                if s >= 0 {
-                    builder = builder.with_header("content-length", &s.to_string())?;
-                }
+            let mut builder = Response::builder().with_status(200);
+            for (name, value) in safe_download_headers(Some(&stored_ct), size) {
+                builder = builder.with_header(name, &value)?;
             }
             let resp = builder.stream(stream);
             Ok(resp)
@@ -490,6 +505,32 @@ fn parse_content_length(headers: &Headers) -> Result<i64, AppError> {
         .map_err(|_| bad("Invalid Content-Length header"))
 }
 
+fn safe_download_content_type(_stored_content_type: Option<&str>) -> &'static str {
+    "application/octet-stream"
+}
+
+fn safe_download_headers(
+    stored_content_type: Option<&str>,
+    content_length: Option<i64>,
+) -> Vec<(&'static str, String)> {
+    let mut headers = vec![
+        (
+            "content-type",
+            safe_download_content_type(stored_content_type).to_string(),
+        ),
+        ("x-content-type-options", "nosniff".to_string()),
+        ("content-disposition", "attachment".to_string()),
+    ];
+
+    if let Some(size) = content_length {
+        if size >= 0 {
+            headers.push(("content-length", size.to_string()));
+        }
+    }
+
+    headers
+}
+
 fn bad(msg: &str) -> AppError {
     AppError::BadRequest(msg.to_string())
 }
@@ -511,4 +552,43 @@ fn ok_empty(status: u16) -> Result<Response, AppError> {
     Response::empty()
         .map(|r| r.with_status(status))
         .map_err(AppError::Worker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_active_content_type_is_never_served_from_vault_origin() {
+        assert_eq!(
+            safe_download_content_type(Some("text/html; charset=utf-8")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            safe_download_content_type(Some("image/svg+xml")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            safe_download_content_type(Some("application/javascript")),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn download_headers_force_attachment_and_disable_sniffing() {
+        let headers = safe_download_headers(Some("text/html"), Some(42));
+
+        assert!(headers
+            .iter()
+            .any(|(name, value)| *name == "content-type" && value == "application/octet-stream"));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| *name == "x-content-type-options" && value == "nosniff"));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| { *name == "content-disposition" && value == "attachment" }));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| *name == "content-length" && value == "42"));
+    }
 }

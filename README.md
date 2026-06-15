@@ -146,6 +146,10 @@ This project includes rate limiting powered by [Cloudflare's Rate Limiting API](
 | `/identity/connect/token` | 5 req/min | Email address | Prevent password brute force |
 | `/api/accounts/register` | 5 req/min | IP address | Prevent mass registration & email enumeration |
 | `/api/accounts/prelogin` | 5 req/min | IP address | Prevent email enumeration |
+| `/api/accounts/password-hint` | 5 req/min | IP address | Slow password-hint probing |
+| `/api/auth-requests` | 5 req/min | Email + device + IP | Slow login-with-device prompt spam |
+| `/api/sends/access/*` | 5 req/min | Send ID + IP | Slow Send password brute force |
+| `/api/devices/knowndevice` | 5 req/min | Email + device + IP | Slow known-device probing |
 
 You can adjust the rate limit settings in `wrangler.toml`:
 
@@ -246,6 +250,9 @@ Configure environment variables in `wrangler.toml` under `[vars]`, or set them v
   - Max total Send file storage per user in KB.
 * **`SEND_TTL_SECS`** (Optional, Default: `300`):
   - TTL for Send file upload/download URLs.
+* **`ENABLE_UNAUTHENTICATED_KNOWN_DEVICE_LOOKUP`** (Optional, Default: `false`):
+  - Set to `true` to preserve the legacy `/api/devices/knowndevice` email/device lookup behavior.
+  - Leave unset for the secure default, which returns `false` without revealing stored email/device pairings.
 
 ### Scheduled Tasks (Cron)
 
