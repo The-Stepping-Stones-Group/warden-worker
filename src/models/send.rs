@@ -188,6 +188,48 @@ impl SendDB {
     pub fn storage_key(&self) -> Option<String> {
         self.file_id().map(|fid| format!("sends/{}/{fid}", self.id))
     }
+
+    pub fn matches_file_id(&self, file_id: &str) -> bool {
+        self.file_id().as_deref() == Some(file_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_send(file_id: &str) -> SendDB {
+        SendDB {
+            id: "send-id".to_string(),
+            user_id: "user-id".to_string(),
+            name: "send".to_string(),
+            notes: None,
+            send_type: SendType::File as i32,
+            data: serde_json::json!({ "id": file_id, "size": 12 }).to_string(),
+            akey: "key".to_string(),
+            password_hash: None,
+            password_salt: None,
+            password_iter: None,
+            max_access_count: None,
+            access_count: 0,
+            created_at: db::now_string(),
+            updated_at: db::now_string(),
+            expiration_date: None,
+            deletion_date: (Utc::now() + chrono::Duration::days(1))
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            disabled: 0,
+            hide_email: 0,
+        }
+    }
+
+    #[test]
+    fn file_send_download_path_must_match_stored_file_id() {
+        let send = file_send("stored-file-id");
+
+        assert!(send.matches_file_id("stored-file-id"));
+        assert!(!send.matches_file_id("attacker-file-id"));
+    }
 }
 
 // ── JSON serialization ──────────────────────────────────────────────
@@ -353,18 +395,30 @@ impl SendDB {
     }
 
     pub async fn increment_access_count(&mut self, db: &crate::db::Db) -> Result<(), AppError> {
-        self.access_count += 1;
         self.updated_at = db::now_string();
-        d1_query!(
+        let result = d1_query!(
             db,
-            "UPDATE sends SET access_count = ?1, updated_at = ?2 WHERE id = ?3",
-            self.access_count,
+            "UPDATE sends
+             SET access_count = access_count + 1, updated_at = ?1
+             WHERE id = ?2 AND (max_access_count IS NULL OR access_count < max_access_count)",
             self.updated_at,
             self.id
         )
         .map_err(|_| AppError::Database)?
         .run()
-        .await?;
+        .await
+        .map_err(|_| AppError::Database)?;
+
+        let changes = result
+            .meta()
+            .map_err(|_| AppError::Database)?
+            .and_then(|m| m.changes)
+            .unwrap_or(0);
+        if changes == 0 {
+            return Err(inaccessible_error());
+        }
+
+        self.access_count += 1;
         Ok(())
     }
 

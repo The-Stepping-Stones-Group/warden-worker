@@ -49,6 +49,36 @@ async fn current_device(
         .ok_or_else(|| AppError::Unauthorized("Invalid token".to_string()))
 }
 
+fn known_device_rate_limit_key(email: &str, identifier: &str, ip: &str) -> String {
+    format!(
+        "known-device:{}:{}:{}",
+        email.trim().to_lowercase(),
+        identifier.trim(),
+        ip
+    )
+}
+
+async fn enforce_rate_limit(env: &Env, key: String) -> Result<(), AppError> {
+    if let Ok(rate_limiter) = env.rate_limiter("LOGIN_RATE_LIMITER") {
+        if let Ok(outcome) = rate_limiter.limit(key).await {
+            if !outcome.success {
+                return Err(AppError::TooManyRequests(
+                    "Too many requests. Please try again later.".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn unauthenticated_known_device_lookup_enabled(env: &Env) -> bool {
+    env.var("ENABLE_UNAUTHENTICATED_KNOWN_DEVICE_LOOKUP")
+        .ok()
+        .map(|value| value.to_string().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// GET /devices
 #[worker::send]
 pub async fn get_devices(
@@ -89,6 +119,13 @@ pub async fn get_known_device(
     let encoded_email = required_header(&headers, "X-Request-Email")?;
     let identifier = required_header(&headers, "X-Device-Identifier")?;
     let email = decode_base64url_email(&encoded_email)?.to_lowercase();
+    let ip = crate::client_context::request_ip_from_headers(&headers);
+    enforce_rate_limit(&env, known_device_rate_limit_key(&email, &identifier, &ip)).await?;
+
+    if !unauthenticated_known_device_lookup_enabled(&env) {
+        return Ok(Json(false));
+    }
+
     let db = db::get_db(&env)?;
 
     let user_id: Option<String> = db

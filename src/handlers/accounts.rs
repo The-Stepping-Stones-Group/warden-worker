@@ -318,7 +318,7 @@ pub async fn send_verification_email() -> Result<Json<String>, AppError> {
 /// POST /api/accounts/password-hint
 ///
 /// Bitwarden normally sends the master password hint via email. This project does not implement
-/// email delivery, so we return the hint directly.
+/// email delivery, so the endpoint returns a generic response and never discloses the stored hint.
 #[worker::send]
 pub async fn password_hint(
     State(env): State<Arc<Env>>,
@@ -341,8 +341,6 @@ pub async fn password_hint(
         }
     }
 
-    const NO_HINT: &str = "Sorry, you have no password hint...";
-
     let db = db::get_db(&env)?;
     let email = payload.email.to_lowercase();
 
@@ -362,13 +360,13 @@ pub async fn password_hint(
         }
     });
 
-    if let Some(hint) = hint {
-        return Err(AppError::BadRequest(format!(
-            "Your password hint is: {hint}"
-        )));
-    }
+    Err(AppError::BadRequest(password_hint_response_message(
+        hint.as_deref(),
+    )))
+}
 
-    Err(AppError::BadRequest(NO_HINT.to_string()))
+fn password_hint_response_message(_stored_hint: Option<&str>) -> String {
+    "Password hint delivery is not configured for this server.".to_string()
 }
 
 #[worker::send]
@@ -405,6 +403,19 @@ pub async fn get_tasks() -> Result<Json<Value>, AppError> {
         "data": [],
         "object": "list"
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_hint_response_never_contains_stored_hint() {
+        let message = password_hint_response_message(Some("my memorable hint"));
+
+        assert!(!message.contains("my memorable hint"));
+        assert!(!message.contains("Your password hint is"));
+    }
 }
 
 #[worker::send]

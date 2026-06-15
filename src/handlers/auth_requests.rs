@@ -44,6 +44,41 @@ fn bad_request() -> AppError {
     AppError::BadRequest("AuthRequest doesn't exist".to_string())
 }
 
+fn auth_request_rate_limit_key(email: &str, device_identifier: &str, ip: &str) -> String {
+    format!(
+        "auth-request:{}:{}:{}",
+        email.trim().to_lowercase(),
+        device_identifier.trim(),
+        ip
+    )
+}
+
+async fn enforce_rate_limit(env: &Env, key: String) -> Result<(), AppError> {
+    if let Ok(rate_limiter) = env.rate_limiter("LOGIN_RATE_LIMITER") {
+        if let Ok(outcome) = rate_limiter.limit(key).await {
+            if !outcome.success {
+                return Err(AppError::TooManyRequests(
+                    "Too many requests. Please try again later.".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn find_user_by_id(db: &crate::db::Db, user_id: &str) -> Result<User, AppError> {
+    let row: Value = db
+        .prepare("SELECT * FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(bad_request)?;
+
+    serde_json::from_value(row).map_err(|_| AppError::Internal)
+}
+
 /// POST /api/auth-requests
 #[worker::send]
 pub async fn post_auth_request(
@@ -52,12 +87,18 @@ pub async fn post_auth_request(
     headers: HeaderMap,
     Json(payload): Json<CreateAuthRequest>,
 ) -> Result<Json<Value>, AppError> {
+    let request_ip = request_ip_from_headers(&headers);
+    enforce_rate_limit(
+        &env,
+        auth_request_rate_limit_key(&payload.email, &payload.device_identifier, &request_ip),
+    )
+    .await?;
+
     let db = db::get_db(&env)?;
     let user = User::find_by_email(&db, &payload.email.to_lowercase())
         .await?
         .ok_or_else(bad_request)?;
     let request_device_type = request_device_type_from_headers(&headers);
-    let request_ip = request_ip_from_headers(&headers);
 
     let device =
         Device::find_by_identifier_and_user(&db, &payload.device_identifier, &user.id).await?;
@@ -156,13 +197,25 @@ pub async fn put_auth_request(
             "An authentication request with the same device already exists".to_string(),
         ));
     }
+    if auth_request.is_expired() {
+        return Err(bad_request());
+    }
 
     auth_request.response_date = Some(db::now_string());
 
     if payload.request_approved {
+        let provided_hash = payload
+            .master_password_hash
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("Invalid password".to_string()))?;
+        let user = find_user_by_id(&db, &claims.sub).await?;
+        if !user.verify_master_password(provided_hash).await?.is_valid() {
+            return Err(AppError::Unauthorized("Invalid password".to_string()));
+        }
+
         auth_request.set_approved(true);
         auth_request.enc_key = Some(payload.key);
-        auth_request.master_password_hash = payload.master_password_hash;
+        auth_request.master_password_hash = Some(provided_hash.to_string());
         auth_request.response_device_id = Some(payload.device_identifier);
         auth_request.update(&db).await?;
 
@@ -200,10 +253,11 @@ pub async fn get_auth_request_response(
         .await?
         .ok_or_else(bad_request)?;
 
-    if auth_request.device_type != request_device_type_from_headers(&headers)
-        || auth_request.request_ip != request_ip_from_headers(&headers)
-        || !auth_request.check_access_code(&query.code)
-    {
+    if !auth_request.can_return_response_material(
+        request_device_type_from_headers(&headers),
+        &request_ip_from_headers(&headers),
+        &query.code,
+    ) {
         return Err(bad_request());
     }
 

@@ -99,6 +99,21 @@ impl AuthRequest {
         ct_eq(&self.access_code, access_code)
     }
 
+    pub fn can_return_response_material(
+        &self,
+        device_type: i32,
+        request_ip: &str,
+        access_code: &str,
+    ) -> bool {
+        self.device_type == device_type
+            && self.request_ip == request_ip
+            && self.check_access_code(access_code)
+            && self.is_approved()
+            && !self.is_expired()
+            && self.enc_key.is_some()
+            && self.master_password_hash.is_some()
+    }
+
     /// Whether this auth request has expired (creation_date + EXPIRY_MINUTES has passed).
     pub fn is_expired(&self) -> bool {
         let Ok(created) =
@@ -255,5 +270,57 @@ impl AuthRequest {
             .unwrap_or(0) as u32;
 
         Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(created_minutes_ago: i64, approved: Option<i32>) -> AuthRequest {
+        let creation_date = (Utc::now() - Duration::minutes(created_minutes_ago))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+
+        AuthRequest {
+            id: "auth-request-id".to_string(),
+            user_id: "user-id".to_string(),
+            request_device_identifier: "request-device".to_string(),
+            device_type: DeviceType::ChromeBrowser.as_i32(),
+            request_ip: "203.0.113.10".to_string(),
+            response_device_id: Some("approving-device".to_string()),
+            access_code: "access-code".to_string(),
+            public_key: "public-key".to_string(),
+            enc_key: Some("enc-key".to_string()),
+            master_password_hash: Some("master-password-hash".to_string()),
+            approved,
+            creation_date,
+            response_date: Some(db::now_string()),
+            authentication_date: None,
+        }
+    }
+
+    #[test]
+    fn response_material_requires_approval_and_unexpired_request() {
+        let valid = request(1, Some(1));
+        assert!(valid.can_return_response_material(
+            DeviceType::ChromeBrowser.as_i32(),
+            "203.0.113.10",
+            "access-code"
+        ));
+
+        let expired = request(AUTH_REQUEST_EXPIRY_MINUTES + 1, Some(1));
+        assert!(!expired.can_return_response_material(
+            DeviceType::ChromeBrowser.as_i32(),
+            "203.0.113.10",
+            "access-code"
+        ));
+
+        let pending = request(1, None);
+        assert!(!pending.can_return_response_material(
+            DeviceType::ChromeBrowser.as_i32(),
+            "203.0.113.10",
+            "access-code"
+        ));
     }
 }

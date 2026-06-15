@@ -10,11 +10,14 @@ use crate::{
     db,
     error::AppError,
     handlers::allow_totp_drift,
-    models::twofactor::{
-        DisableAuthenticatorData, DisableTwoFactorData, EnableAuthenticatorData, TwoFactor,
-        TwoFactorType,
-    },
     models::user::{PasswordOrOtpData, User},
+    models::{
+        device::Device,
+        twofactor::{
+            DisableAuthenticatorData, DisableTwoFactorData, EnableAuthenticatorData, TwoFactor,
+            TwoFactorType,
+        },
+    },
 };
 
 /// List all 2FA records for a user (excludes atype >= 1000).
@@ -174,6 +177,7 @@ pub async fn activate_authenticator(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+    Device::clear_twofactor_remember_by_user(&db, &user_id).await?;
 
     // Create new TOTP entry
     let mut twofactor = TwoFactor::new(user_id.clone(), TwoFactorType::Authenticator, key.clone());
@@ -255,6 +259,9 @@ pub async fn disable_twofactor(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+    if type_ == TwoFactorType::Authenticator as i32 {
+        Device::clear_twofactor_remember_by_user(&db, &user_id).await?;
+    }
 
     log::info!("User {} disabled 2FA type {}", user_id, type_);
 
@@ -325,6 +332,7 @@ pub async fn disable_authenticator(
         .run()
         .await
         .map_err(|_| AppError::Database)?;
+    Device::clear_twofactor_remember_by_user(&db, &user_id).await?;
 
     log::info!(
         "User {} disabled authenticator (2FA type {})",
