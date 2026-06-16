@@ -901,7 +901,7 @@ git commit -m "feat: add organization collection routes"
 - Modify: `src/handlers/import.rs`
 - Modify: `src/router.rs`
 
-- [ ] **Step 1: Write failing collection assignment tests**
+- [x] **Step 1: Write failing collection assignment tests**
 
 Add pure tests in `src/handlers/ciphers.rs`:
 
@@ -919,7 +919,7 @@ fn normalize_collection_ids_removes_duplicates_and_empty_values() {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -929,7 +929,7 @@ cargo test --locked normalize_collection_ids_removes_duplicates_and_empty_values
 
 Expected: fail because `normalize_collection_ids` does not exist.
 
-- [ ] **Step 3: Implement collection assignment helpers**
+- [x] **Step 3: Implement collection assignment helpers**
 
 In `ciphers.rs`, add helpers:
 
@@ -939,7 +939,7 @@ In `ciphers.rs`, add helpers:
 
 Use `DELETE FROM ciphers_collections WHERE cipher_id = ?1` followed by batch inserts.
 
-- [ ] **Step 4: Update create/update/share paths**
+- [x] **Step 4: Update create/update/share paths**
 
 Update `create_cipher`, `create_cipher_simple`, `update_cipher`, import, and new share routes so:
 
@@ -949,7 +949,7 @@ Update `create_cipher`, `create_cipher_simple`, `update_cipher`, import, and new
 - `ciphers_collections` is persisted on create/share/update;
 - returned `Cipher` includes collection IDs and permission booleans.
 
-- [ ] **Step 5: Mount cipher share routes**
+- [x] **Step 5: Mount cipher share routes**
 
 Add routes:
 
@@ -959,7 +959,7 @@ Add routes:
 .route("/api/ciphers/{id}/collections_v2", post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections))
 ```
 
-- [ ] **Step 6: Verify green**
+- [x] **Step 6: Verify green**
 
 Run:
 
@@ -971,7 +971,7 @@ cargo fmt -- --check
 
 Expected: all local tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/models/cipher.rs src/handlers/ciphers.rs src/handlers/import.rs src/router.rs

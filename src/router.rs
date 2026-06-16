@@ -174,6 +174,18 @@ pub fn api_router(env: Env) -> Router {
             "/api/ciphers/{id}/details",
             get(ciphers::get_cipher_details),
         )
+        .route(
+            "/api/ciphers/{id}/share",
+            post(ciphers::share_cipher).put(ciphers::share_cipher),
+        )
+        .route(
+            "/api/ciphers/{id}/collections",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
+        )
+        .route(
+            "/api/ciphers/{id}/collections_v2",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
+        )
         // Attachments
         .route(
             "/api/ciphers/{id}/attachment/v2",

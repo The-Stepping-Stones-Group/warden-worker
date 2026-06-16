@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use log; // Used for warning logs on parse failures
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use uuid::Uuid;
 use worker::{wasm_bindgen::JsValue, Env};
 
@@ -15,9 +15,13 @@ use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
 use crate::handlers::attachments;
+use crate::handlers::cipher_access::{
+    ensure_cipher_read, ensure_cipher_write, get_cipher_access_view,
+};
 use crate::models::cipher::{
     Cipher, CipherDBModel, CipherData, CipherRequestData, CreateCipherRequest, PartialCipherData,
 };
+use crate::models::organization::{is_org_admin_type, ORG_USER_STATUS_CONFIRMED};
 use crate::models::user::{PasswordOrOtpData, User};
 use crate::notifications::{self, UpdateType};
 use crate::BaseUrl;
@@ -32,6 +36,12 @@ impl IntoResponse for RawJson {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CipherJsonRenderOptions {
+    pub force_row_query: bool,
+    pub include_access_fields: bool,
+}
+
 /// Helper to fetch a cipher by id for a user or return NotFound.
 async fn fetch_cipher_for_user(
     db: &crate::db::Db,
@@ -44,6 +54,377 @@ async fn fetch_cipher_for_user(
         .await
         .map_err(|_| AppError::Database)?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))
+}
+
+async fn fetch_cipher_by_id(
+    db: &crate::db::Db,
+    cipher_id: &str,
+) -> Result<CipherDBModel, AppError> {
+    db.prepare("SELECT * FROM ciphers WHERE id = ?1")
+        .bind(&[cipher_id.to_string().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))
+}
+
+pub(crate) fn normalize_collection_ids(collection_ids: Vec<String>) -> Vec<String> {
+    collection_ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) async fn validate_collections_for_org(
+    db: &crate::db::Db,
+    org_id: &str,
+    collection_ids: &[String],
+) -> Result<(), AppError> {
+    for collection_id in collection_ids {
+        let exists: Option<String> = db
+            .prepare("SELECT id FROM collections WHERE id = ?1 AND organization_id = ?2")
+            .bind(&[collection_id.as_str().into(), org_id.into()])?
+            .first(Some("id"))
+            .await
+            .map_err(|_| AppError::Database)?;
+
+        if exists.is_none() {
+            return Err(AppError::BadRequest(
+                "Invalid collection for organization".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct OrgCipherAccessRow {
+    access_all: i32,
+    #[serde(rename = "type")]
+    member_type: i32,
+}
+
+async fn ensure_org_cipher_write_access(
+    db: &crate::db::Db,
+    org_id: &str,
+    user_id: &str,
+    collection_ids: &[String],
+) -> Result<(), AppError> {
+    let membership: OrgCipherAccessRow = db
+        .prepare(
+            "SELECT access_all, type \
+             FROM users_organizations \
+             WHERE organization_id = ?1 AND user_id = ?2 AND status = ?3",
+        )
+        .bind(&[
+            org_id.into(),
+            user_id.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+        ])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::Forbidden("Organization access required".to_string()))?;
+
+    if membership.access_all != 0 || is_org_admin_type(membership.member_type) {
+        return Ok(());
+    }
+
+    if collection_ids.is_empty() {
+        return Err(AppError::Forbidden(
+            "Collection write access required".to_string(),
+        ));
+    }
+
+    for collection_id in collection_ids {
+        let read_only: Option<i32> = db
+            .prepare(
+                "SELECT read_only \
+                 FROM users_collections \
+                 WHERE user_id = ?1 AND collection_id = ?2",
+            )
+            .bind(&[user_id.into(), collection_id.as_str().into()])?
+            .first(Some("read_only"))
+            .await
+            .map_err(|_| AppError::Database)?;
+
+        match read_only {
+            Some(0) => {}
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Collection write access required".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn validate_cipher_org_assignment(
+    db: &crate::db::Db,
+    user_id: &str,
+    organization_id: Option<&str>,
+    collection_ids: &[String],
+) -> Result<(), AppError> {
+    match organization_id {
+        Some(org_id) => {
+            validate_collections_for_org(db, org_id, collection_ids).await?;
+            ensure_org_cipher_write_access(db, org_id, user_id, collection_ids).await
+        }
+        None if collection_ids.is_empty() => Ok(()),
+        None => Err(AppError::BadRequest(
+            "Personal ciphers cannot be assigned to collections".to_string(),
+        )),
+    }
+}
+
+async fn ensure_org_cipher_collection_manage_access(
+    db: &crate::db::Db,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let membership: OrgCipherAccessRow = db
+        .prepare(
+            "SELECT access_all, type \
+             FROM users_organizations \
+             WHERE organization_id = ?1 AND user_id = ?2 AND status = ?3",
+        )
+        .bind(&[
+            org_id.into(),
+            user_id.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+        ])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::Forbidden("Organization access required".to_string()))?;
+
+    if membership.access_all != 0 || is_org_admin_type(membership.member_type) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "Organization admin permissions required to change cipher collections".to_string(),
+        ))
+    }
+}
+
+pub(crate) async fn replace_cipher_collections(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    collection_ids: &[String],
+    now: &str,
+) -> Result<(), AppError> {
+    let mut statements = vec![d1_query!(
+        db,
+        "DELETE FROM ciphers_collections WHERE cipher_id = ?1",
+        cipher_id
+    )
+    .map_err(|_| AppError::Database)?];
+
+    for collection_id in collection_ids {
+        statements.push(
+            d1_query!(
+                db,
+                "INSERT INTO ciphers_collections (cipher_id, collection_id, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                cipher_id,
+                collection_id,
+                now
+            )
+            .map_err(|_| AppError::Database)?,
+        );
+    }
+
+    db.batch(statements).await.map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+fn reject_stale_revision(
+    client_revision: Option<&str>,
+    server_revision: &str,
+) -> Result<(), AppError> {
+    let Some(dt) = client_revision else {
+        return Ok(());
+    };
+
+    match DateTime::parse_from_rfc3339(dt) {
+        Ok(client_dt) => match DateTime::parse_from_rfc3339(server_revision) {
+            Ok(server_dt) => {
+                if server_dt.signed_duration_since(client_dt).num_seconds() > 1 {
+                    return Err(AppError::BadRequest(
+                        "The client copy of this cipher is out of date. Resync the client and try again.".to_string(),
+                    ));
+                }
+            }
+            Err(err) => log::warn!(
+                "Error parsing server revisionDate '{}' for stale check: {}",
+                server_revision,
+                err
+            ),
+        },
+        Err(err) => log::warn!("Error parsing lastKnownRevisionDate '{}': {}", dt, err),
+    }
+
+    Ok(())
+}
+
+async fn collection_ids_for_cipher(
+    db: &crate::db::Db,
+    cipher_id: &str,
+) -> Result<Vec<String>, AppError> {
+    #[derive(Deserialize)]
+    struct CollectionIdRow {
+        collection_id: String,
+    }
+
+    let rows: Vec<CollectionIdRow> = db
+        .prepare(
+            "SELECT collection_id \
+             FROM ciphers_collections \
+             WHERE cipher_id = ?1 \
+             ORDER BY collection_id",
+        )
+        .bind(&[cipher_id.into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()
+        .map_err(|_| AppError::Database)?;
+
+    Ok(rows.into_iter().map(|row| row.collection_id).collect())
+}
+
+async fn hydrate_cipher_access_fields(
+    db: &crate::db::Db,
+    cipher: &mut Cipher,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let Some(view) = get_cipher_access_view(db, &cipher.id, user_id).await? else {
+        return Ok(());
+    };
+
+    cipher.edit = view.can_edit();
+    cipher.view_password = view.can_view_password();
+    cipher.collection_ids = Some(view.collection_ids);
+    Ok(())
+}
+
+pub(crate) async fn touch_cipher_scope_updated_at(
+    db: &crate::db::Db,
+    user_id: &str,
+    organization_id: Option<&str>,
+    now: &str,
+) -> Result<(), AppError> {
+    if let Some(org_id) = organization_id {
+        d1_query!(
+            db,
+            "UPDATE users SET updated_at = ?1 \
+             WHERE id IN (SELECT user_id FROM users_organizations WHERE organization_id = ?2)",
+            now,
+            org_id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    } else {
+        db::touch_user_updated_at(db, user_id, now).await?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn visible_cipher_where_clause() -> &'static str {
+    "(c.organization_id IS NULL AND c.user_id = ?1)
+        OR (
+            c.organization_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                FROM users_organizations uo
+                WHERE uo.organization_id = c.organization_id
+                    AND uo.user_id = ?1
+                    AND uo.status = ?4
+                    AND (
+                        uo.access_all = 1
+                        OR uo.type IN (?2, ?3)
+                        OR EXISTS (
+                            SELECT 1
+                            FROM ciphers_collections cc
+                            JOIN users_collections uc ON uc.collection_id = cc.collection_id
+                            WHERE cc.cipher_id = c.id AND uc.user_id = ?1
+                        )
+                    )
+            )
+        )"
+}
+
+pub(crate) fn visible_cipher_params(user_id: &str) -> Vec<JsValue> {
+    vec![
+        user_id.into(),
+        crate::models::organization::ORG_USER_TYPE_OWNER.into(),
+        crate::models::organization::ORG_USER_TYPE_ADMIN.into(),
+        crate::models::organization::ORG_USER_STATUS_CONFIRMED.into(),
+    ]
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+fn collection_ids_from_value(value: &Value) -> Option<Vec<String>> {
+    let array = match value {
+        Value::Array(values) => Some(values),
+        Value::Object(map) => ["collectionIds", "CollectionIds", "collection_ids", "ids"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(Value::as_array)),
+        _ => None,
+    }?;
+
+    Some(
+        array
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn parse_cipher_share_payload(
+    payload: Value,
+) -> Result<(CipherRequestData, Vec<String>), AppError> {
+    let top_collection_ids = collection_ids_from_value(&payload);
+    let top_organization_id = string_field(&payload, &["organizationId", "organizationID"]);
+
+    let mut cipher = if let Some(cipher_value) =
+        payload.get("cipher").or_else(|| payload.get("Cipher"))
+    {
+        serde_json::from_value::<CipherRequestData>(cipher_value.clone())
+            .map_err(|_| AppError::BadRequest("Invalid cipher payload for sharing".to_string()))?
+    } else {
+        serde_json::from_value::<CipherRequestData>(payload)
+            .map_err(|_| AppError::BadRequest("Invalid cipher payload for sharing".to_string()))?
+    };
+
+    if cipher.organization_id.is_none() {
+        cipher.organization_id = top_organization_id;
+    }
+
+    let collection_ids = top_collection_ids
+        .or_else(|| cipher.collection_ids.clone())
+        .unwrap_or_default();
+
+    Ok((cipher, collection_ids))
 }
 
 async fn validate_folder_for_user(
@@ -79,6 +460,19 @@ pub async fn create_cipher(
     let db = db::get_db(&env)?;
     let now = db::now_string();
     let cipher_data_req = payload.cipher;
+    let collection_ids = normalize_collection_ids(payload.collection_ids);
+    validate_cipher_org_assignment(
+        &db,
+        &claims.sub,
+        cipher_data_req.organization_id.as_deref(),
+        &collection_ids,
+    )
+    .await?;
+    if cipher_data_req.organization_id.is_some() && cipher_data_req.folder_id.is_some() {
+        return Err(AppError::BadRequest(
+            "Organization ciphers cannot be assigned to a personal folder".to_string(),
+        ));
+    }
     validate_folder_for_user(&db, cipher_data_req.folder_id.as_deref(), &claims.sub).await?;
 
     let cipher_data = CipherData::new(
@@ -105,10 +499,10 @@ pub async fn create_cipher(
         organization_use_totp: false,
         edit: true,
         view_password: true,
-        collection_ids: if payload.collection_ids.is_empty() {
+        collection_ids: if collection_ids.is_empty() {
             None
         } else {
-            Some(payload.collection_ids)
+            Some(collection_ids.clone())
         },
         attachments: None,
     };
@@ -133,8 +527,16 @@ pub async fn create_cipher(
     .run()
     .await?;
 
+    replace_cipher_collections(&db, &cipher.id, &collection_ids, &now).await?;
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
-    db::touch_user_updated_at(&db, &claims.sub, &cipher.updated_at).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    touch_cipher_scope_updated_at(
+        &db,
+        &claims.sub,
+        cipher.organization_id.as_deref(),
+        &cipher.updated_at,
+    )
+    .await?;
 
     notifications::publish_cipher_update(
         (*env).clone(),
@@ -159,7 +561,40 @@ pub async fn update_cipher(
     let db = db::get_db(&env)?;
     let now = db::now_string();
 
-    let existing_cipher = fetch_cipher_for_user(&db, &id, &claims.sub).await?;
+    ensure_cipher_write(&db, &id, &claims.sub).await?;
+    let existing_cipher = fetch_cipher_by_id(&db, &id).await?;
+    let organization_id = match (
+        existing_cipher.organization_id.as_ref(),
+        payload.organization_id.as_ref(),
+    ) {
+        (Some(existing_org_id), None) => Some(existing_org_id.clone()),
+        (existing_org_id, requested_org_id) if existing_org_id == requested_org_id => {
+            requested_org_id.cloned()
+        }
+        _ => {
+            return Err(AppError::BadRequest(
+                "Use the cipher share route to change organization ownership".to_string(),
+            ));
+        }
+    };
+    if organization_id.is_some() && payload.folder_id.is_some() {
+        return Err(AppError::BadRequest(
+            "Organization ciphers cannot be assigned to a personal folder".to_string(),
+        ));
+    }
+    let requested_collection_ids = payload.collection_ids.clone().map(normalize_collection_ids);
+    if let Some(collection_ids) = requested_collection_ids.as_ref() {
+        validate_cipher_org_assignment(
+            &db,
+            &claims.sub,
+            organization_id.as_deref(),
+            collection_ids,
+        )
+        .await?;
+        if let Some(org_id) = organization_id.as_deref() {
+            ensure_org_cipher_collection_manage_access(&db, org_id, &claims.sub).await?;
+        }
+    }
 
     // Validate folder ownership if provided
     if let Some(ref folder_id) = payload.folder_id {
@@ -176,27 +611,10 @@ pub async fn update_cipher(
         }
     }
 
-    // Reject updates based on stale client data when the last known revision is provided
-    if let Some(dt) = payload.last_known_revision_date.as_deref() {
-        match DateTime::parse_from_rfc3339(dt) {
-            Ok(client_dt) => match DateTime::parse_from_rfc3339(&existing_cipher.updated_at) {
-                Ok(server_dt) => {
-                    if server_dt.signed_duration_since(client_dt).num_seconds() > 1 {
-                        return Err(AppError::BadRequest(
-                            "The client copy of this cipher is out of date. Resync the client and try again.".to_string(),
-                        ));
-                    }
-                }
-                Err(err) => log::warn!(
-                    "Error parsing server revisionDate '{}' for cipher {}: {}",
-                    existing_cipher.updated_at,
-                    existing_cipher.id,
-                    err
-                ),
-            },
-            Err(err) => log::warn!("Error parsing lastKnownRevisionDate '{}': {}", dt, err),
-        }
-    }
+    reject_stale_revision(
+        payload.last_known_revision_date.as_deref(),
+        &existing_cipher.updated_at,
+    )?;
 
     let cipher_data = CipherData::new(payload.name, payload.notes, payload.type_fields);
 
@@ -204,8 +622,8 @@ pub async fn update_cipher(
 
     let mut cipher = Cipher {
         id: id.clone(),
-        user_id: Some(claims.sub.clone()),
-        organization_id: payload.organization_id.clone(),
+        user_id: Some(existing_cipher.user_id.clone()),
+        organization_id,
         r#type: payload.r#type,
         data: data_value,
         favorite: payload.favorite.unwrap_or(false),
@@ -218,7 +636,10 @@ pub async fn update_cipher(
         organization_use_totp: false,
         edit: true,
         view_password: true,
-        collection_ids: None,
+        collection_ids: Some(match requested_collection_ids.as_ref() {
+            Some(collection_ids) => collection_ids.clone(),
+            None => collection_ids_for_cipher(&db, &id).await?,
+        }),
         attachments: None,
     };
 
@@ -226,7 +647,7 @@ pub async fn update_cipher(
 
     d1_query!(
         &db,
-        "UPDATE ciphers SET organization_id = ?1, type = ?2, data = ?3, favorite = ?4, folder_id = ?5, updated_at = ?6 WHERE id = ?7 AND user_id = ?8",
+        "UPDATE ciphers SET organization_id = ?1, type = ?2, data = ?3, favorite = ?4, folder_id = ?5, updated_at = ?6 WHERE id = ?7",
         cipher.organization_id,
         cipher.r#type,
         data,
@@ -234,10 +655,13 @@ pub async fn update_cipher(
         cipher.folder_id,
         cipher.updated_at,
         id,
-        claims.sub,
     ).map_err(|_|AppError::Database)?
     .run()
     .await?;
+
+    if let Some(collection_ids) = requested_collection_ids.as_ref() {
+        replace_cipher_collections(&db, &id, collection_ids, &now).await?;
+    }
 
     if let Some(attachments2) = &payload.attachments2 {
         for (attachment_id, attachment) in attachments2 {
@@ -266,7 +690,174 @@ pub async fn update_cipher(
     }
 
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
-    db::touch_user_updated_at(&db, &claims.sub, &cipher.updated_at).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    touch_cipher_scope_updated_at(
+        &db,
+        &claims.sub,
+        cipher.organization_id.as_deref(),
+        &cipher.updated_at,
+    )
+    .await?;
+
+    notifications::publish_cipher_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncCipherUpdate,
+        cipher.id.clone(),
+        cipher.updated_at.clone(),
+        Some(claims.device),
+    );
+
+    Ok(Json(cipher))
+}
+
+#[worker::send]
+pub async fn share_cipher(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Cipher>, AppError> {
+    let db = db::get_db(&env)?;
+    ensure_cipher_write(&db, &id, &claims.sub).await?;
+    let existing_cipher = fetch_cipher_by_id(&db, &id).await?;
+    let (payload, raw_collection_ids) = parse_cipher_share_payload(payload)?;
+    let org_id = payload
+        .organization_id
+        .clone()
+        .or(existing_cipher.organization_id.clone())
+        .ok_or_else(|| {
+            AppError::BadRequest("Organization id is required when sharing a cipher".to_string())
+        })?;
+
+    if existing_cipher
+        .organization_id
+        .as_ref()
+        .is_some_and(|existing_org_id| existing_org_id != &org_id)
+    {
+        return Err(AppError::BadRequest(
+            "Cross-organization cipher moves are not supported".to_string(),
+        ));
+    }
+    if payload.folder_id.is_some() {
+        return Err(AppError::BadRequest(
+            "Organization ciphers cannot be assigned to a personal folder".to_string(),
+        ));
+    }
+    reject_stale_revision(
+        payload.last_known_revision_date.as_deref(),
+        &existing_cipher.updated_at,
+    )?;
+
+    let collection_ids = normalize_collection_ids(raw_collection_ids);
+    validate_cipher_org_assignment(&db, &claims.sub, Some(&org_id), &collection_ids).await?;
+    ensure_org_cipher_collection_manage_access(&db, &org_id, &claims.sub).await?;
+
+    let now = db::now_string();
+    let cipher_data = CipherData::new(payload.name, payload.notes, payload.type_fields);
+    let data_value = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
+    let data = serde_json::to_string(&data_value).map_err(|_| AppError::Internal)?;
+
+    let mut cipher = Cipher {
+        id: id.clone(),
+        user_id: Some(existing_cipher.user_id),
+        organization_id: Some(org_id.clone()),
+        r#type: payload.r#type,
+        data: data_value,
+        favorite: payload.favorite.unwrap_or(false),
+        folder_id: None,
+        deleted_at: existing_cipher.deleted_at,
+        archived_at: existing_cipher.archived_at,
+        created_at: existing_cipher.created_at,
+        updated_at: now.clone(),
+        object: "cipher".to_string(),
+        organization_use_totp: false,
+        edit: true,
+        view_password: true,
+        collection_ids: if collection_ids.is_empty() {
+            None
+        } else {
+            Some(collection_ids.clone())
+        },
+        attachments: None,
+    };
+
+    d1_query!(
+        &db,
+        "UPDATE ciphers SET organization_id = ?1, type = ?2, data = ?3, favorite = ?4, \
+         folder_id = NULL, updated_at = ?5 WHERE id = ?6",
+        org_id,
+        cipher.r#type,
+        data,
+        cipher.favorite,
+        cipher.updated_at,
+        id,
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    replace_cipher_collections(&db, &cipher.id, &collection_ids, &now).await?;
+    attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    touch_cipher_scope_updated_at(
+        &db,
+        &claims.sub,
+        cipher.organization_id.as_deref(),
+        &cipher.updated_at,
+    )
+    .await?;
+
+    notifications::publish_cipher_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncCipherUpdate,
+        cipher.id.clone(),
+        cipher.updated_at.clone(),
+        Some(claims.device),
+    );
+
+    Ok(Json(cipher))
+}
+
+#[worker::send]
+pub async fn put_cipher_collections(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Cipher>, AppError> {
+    let db = db::get_db(&env)?;
+    let access = ensure_cipher_write(&db, &id, &claims.sub).await?;
+    let org_id = access.organization_id.ok_or_else(|| {
+        AppError::BadRequest("Personal ciphers cannot be assigned to collections".to_string())
+    })?;
+    let collection_ids = normalize_collection_ids(
+        collection_ids_from_value(&payload)
+            .ok_or_else(|| AppError::BadRequest("collectionIds is required".to_string()))?,
+    );
+
+    validate_cipher_org_assignment(&db, &claims.sub, Some(&org_id), &collection_ids).await?;
+    ensure_org_cipher_collection_manage_access(&db, &org_id, &claims.sub).await?;
+
+    let now = db::now_string();
+    replace_cipher_collections(&db, &id, &collection_ids, &now).await?;
+    d1_query!(
+        &db,
+        "UPDATE ciphers SET updated_at = ?1 WHERE id = ?2",
+        now,
+        id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    let updated = fetch_cipher_by_id(&db, &id).await?;
+    let mut cipher: Cipher = updated.into();
+    cipher.collection_ids = Some(collection_ids);
+    attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    touch_cipher_scope_updated_at(&db, &claims.sub, Some(&org_id), &now).await?;
 
     notifications::publish_cipher_update(
         (*env).clone(),
@@ -287,12 +878,18 @@ pub async fn list_ciphers(
     State(env): State<Arc<Env>>,
 ) -> Result<RawJson, AppError> {
     let db = db::get_db(&env)?;
+    let params = visible_cipher_params(&claims.sub);
+    let where_clause = format!(
+        "WHERE c.deleted_at IS NULL AND ({})",
+        visible_cipher_where_clause()
+    );
     build_cipher_list_response(
         &db,
         env.as_ref(),
-        "WHERE c.user_id = ?1 AND c.deleted_at IS NULL",
-        &[claims.sub.clone().into()],
+        &where_clause,
+        &params,
         "ORDER BY c.updated_at DESC",
+        true,
     )
     .await
 }
@@ -305,10 +902,12 @@ pub async fn get_cipher(
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
-    let cipher = fetch_cipher_for_user(&db, &id, &claims.sub).await?;
+    ensure_cipher_read(&db, &id, &claims.sub).await?;
+    let cipher = fetch_cipher_by_id(&db, &id).await?;
     let mut cipher: Cipher = cipher.into();
 
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
 
     Ok(Json(cipher))
 }
@@ -630,6 +1229,7 @@ pub async fn restore_ciphers_bulk(
         "WHERE c.user_id = ?1 AND c.id IN (SELECT value FROM json_each(?2, '$.ids'))",
         &[claims.sub.into(), body.into()],
         "",
+        false,
     )
     .await
 }
@@ -761,6 +1361,7 @@ pub async fn archive_ciphers_bulk(
         "WHERE c.user_id = ?1 AND c.id IN (SELECT value FROM json_each(?2, '$.ids'))",
         &[claims.sub.into(), body.into()],
         "",
+        false,
     )
     .await
 }
@@ -804,6 +1405,7 @@ pub async fn unarchive_ciphers_bulk(
         "WHERE c.user_id = ?1 AND c.id IN (SELECT value FROM json_each(?2, '$.ids'))",
         &[claims.sub.into(), body.into()],
         "",
+        false,
     )
     .await
 }
@@ -819,6 +1421,20 @@ pub async fn create_cipher_simple(
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
     let now = db::now_string();
+    let collection_ids =
+        normalize_collection_ids(payload.collection_ids.clone().unwrap_or_default());
+    validate_cipher_org_assignment(
+        &db,
+        &claims.sub,
+        payload.organization_id.as_deref(),
+        &collection_ids,
+    )
+    .await?;
+    if payload.organization_id.is_some() && payload.folder_id.is_some() {
+        return Err(AppError::BadRequest(
+            "Organization ciphers cannot be assigned to a personal folder".to_string(),
+        ));
+    }
     validate_folder_for_user(&db, payload.folder_id.as_deref(), &claims.sub).await?;
     let cipher_data = CipherData::new(payload.name, payload.notes, payload.type_fields);
 
@@ -840,7 +1456,11 @@ pub async fn create_cipher_simple(
         organization_use_totp: false,
         edit: true,
         view_password: true,
-        collection_ids: None,
+        collection_ids: if collection_ids.is_empty() {
+            None
+        } else {
+            Some(collection_ids.clone())
+        },
         attachments: None,
     };
 
@@ -863,8 +1483,16 @@ pub async fn create_cipher_simple(
     .run()
     .await?;
 
+    replace_cipher_collections(&db, &cipher.id, &collection_ids, &now).await?;
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
-    db::touch_user_updated_at(&db, &claims.sub, &cipher.updated_at).await?;
+    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    touch_cipher_scope_updated_at(
+        &db,
+        &claims.sub,
+        cipher.organization_id.as_deref(),
+        &cipher.updated_at,
+    )
+    .await?;
 
     notifications::publish_cipher_update(
         (*env).clone(),
@@ -1011,7 +1639,7 @@ struct CipherJsonArrayRow {
 }
 
 /// Build the SQL expression for a single cipher as JSON.
-fn cipher_json_expr(attachments_enabled: bool) -> String {
+fn cipher_json_expr(attachments_enabled: bool, include_access_fields: bool) -> String {
     let attachments_expr = if attachments_enabled {
         "
             (
@@ -1041,6 +1669,51 @@ fn cipher_json_expr(attachments_enabled: bool) -> String {
         "NULL"
     };
 
+    let (edit_expr, view_password_expr) = if include_access_fields {
+        let org_admin_access = "EXISTS (
+            SELECT 1
+            FROM users_organizations uo_perm
+            WHERE uo_perm.organization_id = c.organization_id
+                AND uo_perm.user_id = ?1
+                AND uo_perm.status = ?4
+                AND (uo_perm.access_all = 1 OR uo_perm.type IN (?2, ?3))
+        )";
+        (
+            format!(
+                "CASE
+                    WHEN c.organization_id IS NULL THEN json('true')
+                    WHEN {org_admin_access} THEN json('true')
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM ciphers_collections cc_perm
+                        JOIN users_collections uc_perm ON uc_perm.collection_id = cc_perm.collection_id
+                        WHERE cc_perm.cipher_id = c.id
+                            AND uc_perm.user_id = ?1
+                            AND uc_perm.read_only = 0
+                    ) THEN json('true')
+                    ELSE json('false')
+                END"
+            ),
+            format!(
+                "CASE
+                    WHEN c.organization_id IS NULL THEN json('true')
+                    WHEN {org_admin_access} THEN json('true')
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM ciphers_collections cc_perm
+                        JOIN users_collections uc_perm ON uc_perm.collection_id = cc_perm.collection_id
+                        WHERE cc_perm.cipher_id = c.id
+                            AND uc_perm.user_id = ?1
+                            AND uc_perm.hide_passwords = 0
+                    ) THEN json('true')
+                    ELSE json('false')
+                END"
+            ),
+        )
+    } else {
+        ("json('true')".to_string(), "json('true')".to_string())
+    };
+
     format!(
         "json_object(
             'object', 'cipherDetails',
@@ -1050,9 +1723,9 @@ fn cipher_json_expr(attachments_enabled: bool) -> String {
             'folderId', c.folder_id,
             'type', c.type,
             'favorite', CASE WHEN c.favorite THEN json('true') ELSE json('false') END,
-            'edit', json('true'),
-            'viewPassword', json('true'),
-            'permissions', json_object('delete', json('true'), 'restore', json('true')),
+            'edit', {edit_expr},
+            'viewPassword', {view_password_expr},
+            'permissions', json_object('delete', {edit_expr}, 'restore', {edit_expr}),
             'organizationUseTotp', json('false'),
             'collectionIds', COALESCE((
                 SELECT json_group_array(cc.collection_id)
@@ -1077,6 +1750,8 @@ fn cipher_json_expr(attachments_enabled: bool) -> String {
             'key', json_extract(c.data, '$.key')
         )",
         attachments_expr = attachments_expr,
+        edit_expr = edit_expr,
+        view_password_expr = view_password_expr,
     )
 }
 
@@ -1085,8 +1760,9 @@ fn cipher_json_array_sql(
     attachments_enabled: bool,
     where_clause: &str,
     order_clause: &str,
+    include_access_fields: bool,
 ) -> String {
-    let cipher_expr = cipher_json_expr(attachments_enabled);
+    let cipher_expr = cipher_json_expr(attachments_enabled, include_access_fields);
     // Use a subquery to ensure ORDER BY is applied before json_group_array
     format!(
         "SELECT COALESCE(json_group_array(json(sub.cipher_json)), '[]') AS ciphers_json
@@ -1106,8 +1782,9 @@ fn cipher_json_rows_sql(
     attachments_enabled: bool,
     where_clause: &str,
     order_clause: &str,
+    include_access_fields: bool,
 ) -> String {
-    let cipher_expr = cipher_json_expr(attachments_enabled);
+    let cipher_expr = cipher_json_expr(attachments_enabled, include_access_fields);
     format!(
         "SELECT {cipher_expr} AS cipher_json
         FROM ciphers c
@@ -1132,6 +1809,7 @@ async fn build_cipher_list_response(
     where_clause: &str,
     params: &[JsValue],
     order_clause: &str,
+    include_access_fields: bool,
 ) -> Result<RawJson, AppError> {
     let include_attachments = attachments::attachments_enabled(env);
     let force_row_query = super::ciphers_default_row_query(env);
@@ -1144,7 +1822,10 @@ async fn build_cipher_list_response(
         where_clause,
         params,
         order_clause,
-        force_row_query,
+        CipherJsonRenderOptions {
+            force_row_query,
+            include_access_fields,
+        },
     )
     .await?;
     response.push_str(",\"object\":\"list\",\"continuationToken\":null}");
@@ -1160,9 +1841,9 @@ pub(crate) async fn append_cipher_json_array_raw(
     where_clause: &str,
     params: &[JsValue],
     order_clause: &str,
-    force_row_query: bool,
+    options: CipherJsonRenderOptions,
 ) -> Result<(), AppError> {
-    if force_row_query {
+    if options.force_row_query {
         return append_from_rows(
             out,
             db,
@@ -1170,11 +1851,17 @@ pub(crate) async fn append_cipher_json_array_raw(
             where_clause,
             params,
             order_clause,
+            options.include_access_fields,
         )
         .await;
     }
 
-    let sql = cipher_json_array_sql(attachments_enabled, where_clause, order_clause);
+    let sql = cipher_json_array_sql(
+        attachments_enabled,
+        where_clause,
+        order_clause,
+        options.include_access_fields,
+    );
 
     let row: Result<Option<CipherJsonArrayRow>, worker::Error> =
         db.prepare(&sql).bind(params)?.first(None).await;
@@ -1197,6 +1884,7 @@ pub(crate) async fn append_cipher_json_array_raw(
                 where_clause,
                 params,
                 order_clause,
+                options.include_access_fields,
             )
             .await
         }
@@ -1217,11 +1905,17 @@ pub(crate) async fn append_from_rows(
     where_clause: &str,
     params: &[JsValue],
     order_clause: &str,
+    include_access_fields: bool,
 ) -> Result<(), AppError> {
     use js_sys::Array;
     use wasm_bindgen::JsCast;
 
-    let sql = cipher_json_rows_sql(attachments_enabled, where_clause, order_clause);
+    let sql = cipher_json_rows_sql(
+        attachments_enabled,
+        where_clause,
+        order_clause,
+        include_access_fields,
+    );
 
     // Use raw_js_value() to get Vec<JsValue> without Serde deserialization.
     // Each JsValue is a JS array: [cipher_json_string]
@@ -1262,11 +1956,38 @@ mod tests {
 
     #[test]
     fn cipher_json_expression_uses_access_aliases_for_org_permissions() {
-        let sql = cipher_json_expr(false);
+        let sql = cipher_json_expr(false, true);
 
         assert!(sql.contains("'collectionIds'"));
         assert!(sql.contains("json_group_array"));
         assert!(sql.contains("'edit'"));
         assert!(sql.contains("'viewPassword'"));
+        assert!(sql.contains("uc_perm.read_only = 0"));
+        assert!(sql.contains("uc_perm.hide_passwords = 0"));
+    }
+
+    #[test]
+    fn visible_cipher_where_clause_includes_personal_and_org_access() {
+        let clause = visible_cipher_where_clause();
+
+        assert!(clause.contains("c.organization_id IS NULL"));
+        assert!(clause.contains("users_organizations"));
+        assert!(clause.contains("users_collections"));
+        assert!(clause.contains("ciphers_collections"));
+    }
+
+    #[test]
+    fn normalize_collection_ids_removes_duplicates_and_empty_values() {
+        let ids = normalize_collection_ids(vec![
+            "collection-2".into(),
+            "".into(),
+            "collection-1".into(),
+            "collection-2".into(),
+        ]);
+
+        assert_eq!(
+            ids,
+            vec!["collection-1".to_string(), "collection-2".to_string()]
+        );
     }
 }

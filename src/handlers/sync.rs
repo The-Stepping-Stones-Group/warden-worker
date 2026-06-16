@@ -127,39 +127,19 @@ pub async fn get_sync_data(
     response.push_str(",\"collections\":");
     response.push_str(&collections_json);
     response.push_str(",\"policies\":[],\"ciphers\":");
+    let visible_ciphers_where = format!("WHERE {}", ciphers::visible_cipher_where_clause());
+    let visible_ciphers_params = ciphers::visible_cipher_params(&user_id);
     ciphers::append_cipher_json_array_raw(
         &mut response,
         &db,
         include_attachments,
-        "WHERE (c.organization_id IS NULL AND c.user_id = ?1)
-            OR (
-                c.organization_id IS NOT NULL
-                AND EXISTS (
-                    SELECT 1
-                    FROM users_organizations uo
-                    WHERE uo.organization_id = c.organization_id
-                        AND uo.user_id = ?1
-                        AND uo.status = ?4
-                        AND (
-                            uo.access_all = 1
-                            OR uo.type IN (?2, ?3)
-                            OR EXISTS (
-                                SELECT 1
-                                FROM ciphers_collections cc
-                                JOIN users_collections uc ON uc.collection_id = cc.collection_id
-                                WHERE cc.cipher_id = c.id AND uc.user_id = ?1
-                            )
-                        )
-                )
-            )",
-        &[
-            user_id.clone().into(),
-            crate::models::organization::ORG_USER_TYPE_OWNER.into(),
-            crate::models::organization::ORG_USER_TYPE_ADMIN.into(),
-            crate::models::organization::ORG_USER_STATUS_CONFIRMED.into(),
-        ],
+        &visible_ciphers_where,
+        &visible_ciphers_params,
         "",
-        force_row_query,
+        ciphers::CipherJsonRenderOptions {
+            force_row_query,
+            include_access_fields: true,
+        },
     )
     .await?;
 

@@ -14,7 +14,13 @@ use crate::models::folder::Folder;
 use crate::models::import::ImportRequest;
 use crate::notifications::{self, UpdateType};
 
-use super::get_batch_size;
+use super::{
+    ciphers::{
+        normalize_collection_ids, replace_cipher_collections, touch_cipher_scope_updated_at,
+        validate_cipher_org_assignment,
+    },
+    get_batch_size,
+};
 
 /// Import ciphers and folders.
 /// Aligned with vaultwarden's POST /ciphers/import implementation.
@@ -119,12 +125,29 @@ pub async fn import_data(
 
     // Prepare all cipher insert statements
     let mut cipher_statements: Vec<D1PreparedStatement> = Vec::with_capacity(data.ciphers.len());
+    let mut cipher_collection_updates: Vec<(String, Vec<String>)> = Vec::new();
+    let mut touched_org_ids: HashSet<String> = HashSet::new();
 
     for (index, import_cipher) in data.ciphers.into_iter().enumerate() {
         // Determine folder_id from folder_relationships
         let folder_id = relations_map
             .get(&index)
             .and_then(|folder_idx| folders.get(*folder_idx).cloned());
+        let organization_id = import_cipher.organization_id.clone();
+        let collection_ids =
+            normalize_collection_ids(import_cipher.collection_ids.clone().unwrap_or_default());
+        if organization_id.is_some() && folder_id.is_some() {
+            return Err(AppError::BadRequest(
+                "Organization ciphers cannot be assigned to a personal folder".to_string(),
+            ));
+        }
+        validate_cipher_org_assignment(
+            &db,
+            &claims.sub,
+            organization_id.as_deref(),
+            &collection_ids,
+        )
+        .await?;
 
         let cipher_data = CipherData::new(
             import_cipher.name,
@@ -133,11 +156,12 @@ pub async fn import_data(
         );
 
         let data_value = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
+        let cipher_id = Uuid::new_v4().to_string();
 
         let cipher = Cipher {
-            id: Uuid::new_v4().to_string(),
+            id: cipher_id.clone(),
             user_id: Some(claims.sub.clone()),
-            organization_id: import_cipher.organization_id,
+            organization_id,
             r#type: import_cipher.r#type,
             data: data_value,
             favorite: import_cipher.favorite.unwrap_or(false),
@@ -172,6 +196,10 @@ pub async fn import_data(
         ).map_err(|_| AppError::Database)?;
 
         cipher_statements.push(stmt);
+        if let Some(org_id) = cipher.organization_id.as_ref() {
+            touched_org_ids.insert(org_id.clone());
+        }
+        cipher_collection_updates.push((cipher_id, collection_ids));
     }
 
     // Execute cipher inserts in batches
@@ -179,7 +207,14 @@ pub async fn import_data(
         db::execute_in_batches(&db, cipher_statements, batch_size).await?;
     }
 
+    for (cipher_id, collection_ids) in cipher_collection_updates {
+        replace_cipher_collections(&db, &cipher_id, &collection_ids, &now).await?;
+    }
+
     touch_user_updated_at(&db, &claims.sub, &now).await?;
+    for org_id in touched_org_ids {
+        touch_cipher_scope_updated_at(&db, &claims.sub, Some(&org_id), &now).await?;
+    }
 
     notifications::publish_user_update(
         (*env).clone(),

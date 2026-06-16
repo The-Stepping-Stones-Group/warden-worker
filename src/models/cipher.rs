@@ -377,6 +377,8 @@ pub struct CipherRequestData {
     /// Used during key rotation to update attachment keys and encrypted filenames.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments2: Option<HashMap<String, Attachments2Data>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_ids: Option<Vec<String>>,
     // The revision datetime (in ISO 8601 format) of the client's local copy
     // Used to prevent updating a cipher when client doesn't have the latest version
     #[serde(skip_serializing_if = "Option::is_none")]
