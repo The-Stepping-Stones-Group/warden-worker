@@ -13,7 +13,7 @@ use crate::{
     crypto::{generate_salt, hash_password_for_storage},
     db,
     error::AppError,
-    handlers::{attachments, sends},
+    handlers::{attachments, organizations, sends},
     models::{
         cipher::CipherData,
         device::Device,
@@ -434,7 +434,8 @@ pub async fn get_profile(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let two_factor_enabled = two_factor_enabled(&db, &user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, &user_id).await?;
 
     Ok(Json(profile))
 }
@@ -481,7 +482,8 @@ pub async fn post_profile(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -548,7 +550,8 @@ pub async fn put_avatar(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),

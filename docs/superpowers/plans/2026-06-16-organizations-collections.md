@@ -398,7 +398,7 @@ git commit -m "feat: add organization collection schema models"
 - Modify: `src/models/sync.rs`
 - Modify: `src/handlers/accounts.rs`
 
-- [ ] **Step 1: Write failing profile organization tests**
+- [x] **Step 1: Write failing profile organization tests**
 
 Add pure tests in `src/handlers/organizations.rs` for SQL row mapping:
 
@@ -432,7 +432,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -442,7 +442,7 @@ cargo test --locked organization_profile_rows_map_to_profile_json_values --lib
 
 Expected: fail because `ProfileOrganizationRow` and `profile_rows_to_json` do not exist.
 
-- [ ] **Step 3: Add repository/profile helpers**
+- [x] **Step 3: Add repository/profile helpers**
 
 In `src/handlers/organizations.rs`, add:
 
@@ -545,11 +545,11 @@ impl OrganizationMembershipRow {
 }
 ```
 
-- [ ] **Step 4: Wire profile endpoint**
+- [x] **Step 4: Wire profile endpoint**
 
 Change `Profile::from_user` to keep the existing empty organizations default. In `accounts::get_profile`, after creating the profile, call `organizations::profile_organizations_for_user(&db, &claims.sub).await?` and assign it to `profile.organizations`.
 
-- [ ] **Step 5: Verify green**
+- [x] **Step 5: Verify green**
 
 Run:
 
@@ -561,7 +561,7 @@ cargo fmt -- --check
 
 Expected: profile helper test and existing tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/handlers/organizations.rs src/handlers/mod.rs src/models/sync.rs src/handlers/accounts.rs
