@@ -42,7 +42,7 @@
 - Create: `src/models/collection.rs`
 - Modify: `src/models/mod.rs`
 
-- [ ] **Step 1: Write failing schema/model tests**
+- [x] **Step 1: Write failing schema/model tests**
 
 Add unit tests inside `src/models/organization.rs` and `src/models/collection.rs` before production code exists:
 
@@ -139,17 +139,17 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Verify the tests fail for missing model files**
+- [x] **Step 2: Verify the tests fail for missing model files**
 
 Run:
 
 ```bash
-cargo test --locked organization collection --lib
+cargo test --locked --lib
 ```
 
 Expected: fail because `src/models/organization.rs` and `src/models/collection.rs` are missing or unexported.
 
-- [ ] **Step 3: Add the migration and base schema**
+- [x] **Step 3: Add the migration and base schema**
 
 Create `migrations/0014_add_organizations_collections.sql` with:
 
@@ -233,7 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_ciphers_organization_id
 
 Append the same table and index definitions to `sql/schema.sql` after the `ciphers` table and before attachments.
 
-- [ ] **Step 4: Add pure response/request models**
+- [x] **Step 4: Add pure response/request models**
 
 Create `src/models/organization.rs` with constants, request bodies, and pure JSON builders:
 
@@ -372,18 +372,18 @@ pub struct CollectionRequest {
 
 Export both modules in `src/models/mod.rs`.
 
-- [ ] **Step 5: Verify green**
+- [x] **Step 5: Verify green**
 
 Run:
 
 ```bash
-cargo test --locked organization collection --lib
+cargo test --locked --lib
 cargo fmt -- --check
 ```
 
 Expected: the new model tests pass and formatting is clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add migrations/0014_add_organizations_collections.sql sql/schema.sql src/models/mod.rs src/models/organization.rs src/models/collection.rs
@@ -628,7 +628,7 @@ mod tests {
 Run:
 
 ```bash
-cargo test --locked collection_acl_maps_to_cipher_permissions owner_membership_can_manage_org_cipher --lib
+cargo test --locked --lib
 ```
 
 Expected: fail because `CipherAccessView` does not exist.
@@ -697,7 +697,7 @@ and personal rows match `c.user_id = ?user_id AND c.organization_id IS NULL`.
 Run:
 
 ```bash
-cargo test --locked collection_acl_maps_to_cipher_permissions owner_membership_can_manage_org_cipher --lib
+cargo test --locked --lib
 cargo fmt -- --check
 ```
 
@@ -756,7 +756,7 @@ fn collections_json_array_serializes_collection_details() {
 Run:
 
 ```bash
-cargo test --locked cipher_json_expression_uses_access_aliases_for_org_permissions collections_json_array_serializes_collection_details --lib
+cargo test --locked --lib
 ```
 
 Expected: fail because collection aggregation and SQL expression changes are absent.
@@ -784,7 +784,7 @@ Change `cipher_json_expr` so `collectionIds` is built from `ciphers_collections`
 Run:
 
 ```bash
-cargo test --locked cipher_json_expression_uses_access_aliases_for_org_permissions collections_json_array_serializes_collection_details --lib
+cargo test --locked --lib
 cargo test --locked --lib
 cargo fmt -- --check
 ```
@@ -848,7 +848,7 @@ fn collection_request_accepts_users_and_groups_arrays() {
 Run:
 
 ```bash
-cargo test --locked create_org_request_accepts_bitwarden_payload collection_request_accepts_users_and_groups_arrays --lib
+cargo test --locked --lib
 ```
 
 Expected: fail if request structs do not yet deserialize the payload exactly.
@@ -877,7 +877,7 @@ Add organization and collection routes in `router.rs` near the sync/profile rout
 Run:
 
 ```bash
-cargo test --locked create_org_request_accepts_bitwarden_payload collection_request_accepts_users_and_groups_arrays --lib
+cargo test --locked --lib
 cargo test --locked --lib
 cargo fmt -- --check
 ```
