@@ -100,7 +100,8 @@ This fork does not maintain a public demo instance. Deploy your own Worker and c
 The frontend is bundled with the Worker using [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/). The GitHub Actions workflows download a **pinned** [bw_web_builds](https://github.com/dani-garcia/bw_web_builds) (Vaultwarden web vault) release (default: `v2026.4.1`) and deploy it together with the backend. You can override it via GitHub Actions Variables (`BW_WEB_VERSION` for prod, `BW_WEB_VERSION_DEV` for dev), or set it to `latest` to follow upstream.
 
 **How it works:**
-- Static files (HTML, CSS, JS) are served directly by Cloudflare's edge network.
+- The Worker runs before static assets so private-origin checks can protect the web vault as well as API routes.
+- After those checks, static files (HTML, CSS, JS) are served through the Cloudflare Workers Static Assets binding.
 - API requests (`/api/*`, `/identity/*`, `/notifications/*`) are routed to the Rust Worker.
 - No separate Pages deployment or separate frontend domain is needed.
 

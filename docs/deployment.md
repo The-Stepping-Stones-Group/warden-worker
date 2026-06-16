@@ -101,6 +101,7 @@ This page covers the two deployment paths. Pick the one that fits your workflow 
 - `ALLOWED_EMAILS` your-email@example.com (supports glob patterns like `*@example.com`)
 - `JWT_SECRET` a long random string
 - `JWT_REFRESH_SECRET` a long random string
+- `ORIGIN_SHARED_SECRET` optional private-origin proof. Set this only when Warden is behind a trusted ingress that injects the matching request header. When set, direct public requests without the proof are rejected before static assets or API handlers run.
 
    **Optional mobile push relay settings:**  
      `PUSH_ENABLED=true`, `PUSH_RELAY_URI`, `PUSH_IDENTITY_URI` as text variables;  
@@ -172,6 +173,12 @@ To avoid bundling a large JSON file into the Worker, the dataset can be stored i
 | `GLOBAL_DOMAINS_URL_DEV` | dev | (empty) | raw GitHub URL | Same as prod, but for dev workflow |
 
 If you skip seeding, `/api/settings/domains` and `/api/sync` will return `globalEquivalentDomains: []`.
+
+#### Private origin gate
+
+Set `ORIGIN_SHARED_SECRET` as a Cloudflare Worker secret when Warden should only be reachable through a trusted ingress. The ingress must inject the same value in the `X-SSG-Origin-Secret` request header before proxying to Warden. To use a different header name, set `ORIGIN_SHARED_SECRET_HEADER` as a plain Worker variable and configure the ingress to match.
+
+When `ORIGIN_SHARED_SECRET` is set, the Worker rejects requests without a matching proof before routing API requests or serving the bundled web vault assets. This relies on `assets.run_worker_first = true` and the `ASSETS` binding in `wrangler.toml`, so validate both `/api/*` routes and static web vault paths during rollout.
 
 ### Usage
 

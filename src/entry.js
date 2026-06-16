@@ -8,6 +8,7 @@
  */
 
 import RustWorker from "../build/index.js";
+import { enforceOriginProof, isWorkerRoute } from "./origin-gate.js";
 
 function base64UrlDecode(str) {
   let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
@@ -127,6 +128,16 @@ export default {
     url.pathname = normalizePathname(url.pathname);
     request = new Request(url.toString(), request);
     const method = (request.method || "GET").toUpperCase();
+
+    const originProof = enforceOriginProof(request, env);
+    if (!originProof.ok) {
+      return originProof.response;
+    }
+    request = originProof.request;
+
+    if (!isWorkerRoute(url.pathname) && env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
 
     if (
       env.NOTIFY_DO &&
