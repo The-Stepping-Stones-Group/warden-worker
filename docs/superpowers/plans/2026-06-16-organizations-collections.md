@@ -806,7 +806,7 @@ git commit -m "feat: sync organization collections and ciphers"
 - Modify: `src/handlers/organizations.rs`
 - Modify: `src/router.rs`
 
-- [ ] **Step 1: Write failing request/response tests**
+- [x] **Step 1: Write failing request/response tests**
 
 Add tests in `src/models/organization.rs` and `src/models/collection.rs` for request aliases and route response builders:
 
@@ -845,7 +845,7 @@ fn collection_request_accepts_users_and_groups_arrays() {
 }
 ```
 
-- [ ] **Step 2: Verify red or partial red**
+- [x] **Step 2: Verify red or partial red**
 
 Run:
 
@@ -855,7 +855,7 @@ cargo test --locked --lib
 
 Expected: fail if request structs do not yet deserialize the payload exactly.
 
-- [ ] **Step 3: Implement org CRUD, keys, collections, members**
+- [x] **Step 3: Implement org CRUD, keys, collections, members**
 
 In `organizations.rs`, implement handlers for the routes listed in the design:
 
@@ -870,11 +870,11 @@ In `organizations.rs`, implement handlers for the routes listed in the design:
 
 All admin routes call the admin membership helper. Member-visible routes call confirmed or accepted membership helpers.
 
-- [ ] **Step 4: Mount routes**
+- [x] **Step 4: Mount routes**
 
 Add organization and collection routes in `router.rs` near the sync/profile routes and before ciphers where path specificity matters.
 
-- [ ] **Step 5: Verify green**
+- [x] **Step 5: Verify green**
 
 Run:
 
@@ -886,7 +886,7 @@ cargo fmt -- --check
 
 Expected: tests pass and router compiles.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/models/organization.rs src/models/collection.rs src/handlers/organizations.rs src/router.rs

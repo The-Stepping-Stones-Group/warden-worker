@@ -34,6 +34,7 @@ impl CipherAccessView {
         self.can_edit()
     }
 
+    #[allow(dead_code)]
     pub fn can_view_password(&self) -> bool {
         self.organization_id.is_none()
             || self.access_all

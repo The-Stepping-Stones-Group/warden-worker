@@ -7,7 +7,7 @@ use worker::Env;
 
 use crate::handlers::{
     accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
-    folders, identity, import, meta, sends, sync, twofactor, webauth,
+    folders, identity, import, meta, organizations, sends, sync, twofactor, webauth,
 };
 
 pub fn api_router(env: Env) -> Router {
@@ -40,6 +40,99 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/accounts/profile", post(accounts::post_profile))
         .route("/api/accounts/profile", put(accounts::put_profile))
         .route("/api/accounts/avatar", put(accounts::put_avatar))
+        // Organizations and collections
+        .route(
+            "/api/organizations",
+            post(organizations::create_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}",
+            get(organizations::get_organization)
+                .put(organizations::update_organization)
+                .post(organizations::update_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}/keys",
+            get(organizations::get_organization_keys).post(organizations::post_organization_keys),
+        )
+        .route(
+            "/api/organizations/{org_id}/public-key",
+            get(organizations::get_organization_public_key),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections",
+            get(organizations::list_org_collections).post(organizations::create_collection),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/details",
+            get(organizations::list_org_collections_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}",
+            put(organizations::update_collection)
+                .post(organizations::update_collection)
+                .delete(organizations::delete_collection),
+        )
+        .route("/api/collections", get(organizations::list_all_collections))
+        .route(
+            "/api/organizations/{org_id}/users",
+            get(organizations::list_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/invite",
+            post(organizations::invite_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/accept",
+            post(organizations::accept_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/confirm",
+            post(organizations::confirm_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/confirm",
+            post(organizations::confirm_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}",
+            get(organizations::get_org_user)
+                .put(organizations::update_org_user)
+                .post(organizations::update_org_user)
+                .delete(organizations::delete_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/public-keys",
+            post(organizations::post_org_users_public_keys),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies",
+            get(organizations::list_org_policies),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/{policy_type}",
+            get(organizations::get_org_policy),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups",
+            get(organizations::list_org_groups).post(organizations::post_org_groups),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/metadata",
+            get(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing",
+            get(organizations::org_billing_metadata).post(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/events",
+            get(organizations::list_org_events),
+        )
+        .route(
+            "/api/organizations/{org_id}/event-logs",
+            get(organizations::list_org_events),
+        )
         // Delete account
         .route("/api/accounts", delete(accounts::delete_account))
         .route("/api/accounts/delete", post(accounts::delete_account))

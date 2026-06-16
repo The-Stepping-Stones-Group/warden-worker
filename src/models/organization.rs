@@ -10,6 +10,7 @@ pub const ORG_USER_STATUS_CONFIRMED: i32 = 2;
 pub const ORG_USER_TYPE_OWNER: i32 = 0;
 pub const ORG_USER_TYPE_ADMIN: i32 = 1;
 pub const ORG_USER_TYPE_USER: i32 = 2;
+#[allow(dead_code)]
 pub const ORG_USER_TYPE_MANAGER: i32 = 3;
 
 pub fn is_org_admin_type(member_type: i32) -> bool {
@@ -130,5 +131,21 @@ mod tests {
         assert!(is_org_admin_type(ORG_USER_TYPE_ADMIN));
         assert!(!is_org_admin_type(ORG_USER_TYPE_USER));
         assert!(!is_org_admin_type(ORG_USER_TYPE_MANAGER));
+    }
+
+    #[test]
+    fn create_org_request_accepts_bitwarden_payload() {
+        let body = r#"{
+            "name":"SSG",
+            "billingEmail":"owner@ssg-healthcare.com",
+            "collectionName":"Default",
+            "key":"encrypted-key",
+            "keys":{"encryptedPrivateKey":"encrypted-private","publicKey":"public"}
+        }"#;
+
+        let parsed: CreateOrganizationRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.name, "SSG");
+        assert_eq!(parsed.collection_name, "Default");
+        assert_eq!(parsed.keys.unwrap().public_key, "public");
     }
 }

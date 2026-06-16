@@ -83,4 +83,19 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn collection_request_accepts_users_and_groups_arrays() {
+        let body = r#"{
+            "name":"Shared",
+            "users":[{"id":"member-1","readOnly":true,"hidePasswords":false,"manage":true}],
+            "groups":[],
+            "externalId":null
+        }"#;
+
+        let parsed: CollectionRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.name, "Shared");
+        assert_eq!(parsed.users[0].id, "member-1");
+        assert!(parsed.users[0].read_only);
+    }
 }
