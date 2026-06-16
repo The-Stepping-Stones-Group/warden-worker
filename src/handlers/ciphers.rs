@@ -281,13 +281,17 @@ async fn ensure_org_cipher_collection_manage_access(
         .map_err(|_| AppError::Database)?
         .ok_or_else(|| AppError::Forbidden("Organization access required".to_string()))?;
 
-    if membership.access_all != 0 || is_org_admin_type(membership.member_type) {
+    if can_manage_cipher_collections(membership.member_type, membership.access_all != 0) {
         Ok(())
     } else {
         Err(AppError::Forbidden(
             "Organization admin permissions required to change cipher collections".to_string(),
         ))
     }
+}
+
+fn can_manage_cipher_collections(member_type: i32, _access_all: bool) -> bool {
+    is_org_admin_type(member_type)
 }
 
 pub(crate) async fn replace_cipher_collections(
@@ -2426,6 +2430,10 @@ pub(crate) async fn append_from_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::organization::{
+        ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_CUSTOM, ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER,
+        ORG_USER_TYPE_USER,
+    };
 
     #[test]
     fn cipher_json_expression_uses_access_aliases_for_org_permissions() {
@@ -2512,6 +2520,15 @@ mod tests {
         assert_eq!(payload.cipher_ids, vec!["cipher-1", "cipher-2"]);
         assert_eq!(payload.collection_ids, vec!["collection-1"]);
         assert!(payload.remove_collections);
+    }
+
+    #[test]
+    fn cipher_collection_management_requires_admin_role() {
+        assert!(can_manage_cipher_collections(ORG_USER_TYPE_OWNER, false));
+        assert!(can_manage_cipher_collections(ORG_USER_TYPE_ADMIN, false));
+        assert!(!can_manage_cipher_collections(ORG_USER_TYPE_USER, true));
+        assert!(!can_manage_cipher_collections(ORG_USER_TYPE_CUSTOM, true));
+        assert!(!can_manage_cipher_collections(ORG_USER_TYPE_MANAGER, true));
     }
 
     #[test]
