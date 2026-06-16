@@ -123,7 +123,7 @@ head_sampling_rate = 1
 [[d1_databases]]
 binding = "vault1"
 database_name = "vault1"
-database_id = "${D1_DATABASE_ID}"
+database_id = "06e1397f-1c53-4418-8604-29c20f96826e"
 migrations_dir = "migrations"
 
 # R2 bucket for file attachments (optional, requires credit card)
@@ -138,7 +138,7 @@ bucket_name = "warden-attachments"
 # If R2 is not configured, KV will be used for attachments.
 [[kv_namespaces]]
 binding = "ATTACHMENTS_KV"
-id = "${ATTACHMENTS_KV_ID}"
+id = "df8bcb58389f476cbe96cf4a89a2375c"
 
 [env.dev]
 name = "warden-worker-dev"
