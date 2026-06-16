@@ -7,8 +7,12 @@ use worker::Env;
 
 use crate::handlers::{
     accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
-    folders, identity, import, meta, sends, sync, twofactor, webauth,
+    folders, identity, import, meta, organizations, sends, sync, twofactor, webauth,
 };
+
+const ORG_BILLING_SELF_HOST_METADATA_ROUTE: &str =
+    "/api/organizations/{org_id}/billing/vnext/self-host/metadata";
+const ORG_GROUPS_DETAILS_ROUTE: &str = "/api/organizations/{org_id}/groups/details";
 
 pub fn api_router(env: Env) -> Router {
     let app_state = Arc::new(env);
@@ -40,6 +44,178 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/accounts/profile", post(accounts::post_profile))
         .route("/api/accounts/profile", put(accounts::put_profile))
         .route("/api/accounts/avatar", put(accounts::put_avatar))
+        // Organizations and collections
+        .route(
+            "/api/organizations",
+            post(organizations::create_organization),
+        )
+        .route(
+            "/api/organizations/create-without-payment",
+            post(organizations::create_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}",
+            get(organizations::get_organization)
+                .put(organizations::update_organization)
+                .post(organizations::update_organization),
+        )
+        .route(
+            "/api/organizations/{org_id}/keys",
+            get(organizations::get_organization_keys).post(organizations::post_organization_keys),
+        )
+        .route(
+            "/api/organizations/{org_id}/public-key",
+            get(organizations::get_organization_public_key),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections",
+            get(organizations::list_org_collections).post(organizations::create_collection),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/details",
+            get(organizations::list_org_collections_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/bulk-access",
+            get(organizations::list_org_compatibility_empty)
+                .post(organizations::update_collections_bulk_access),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}/details",
+            get(organizations::get_collection_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}/users",
+            get(organizations::get_collection_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}",
+            get(organizations::get_collection_details)
+                .put(organizations::update_collection)
+                .post(organizations::update_collection)
+                .delete(organizations::delete_collection),
+        )
+        .route("/api/collections", get(organizations::list_all_collections))
+        .route(
+            "/api/organizations/{org_id}/users",
+            get(organizations::list_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/members",
+            get(organizations::list_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/invite",
+            post(organizations::invite_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/mini-details",
+            get(organizations::list_org_users_mini_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/accept",
+            post(organizations::accept_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/confirm",
+            post(organizations::confirm_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/confirm",
+            post(organizations::confirm_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}",
+            get(organizations::get_org_user)
+                .put(organizations::update_org_user)
+                .post(organizations::update_org_user)
+                .delete(organizations::delete_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/members/{member_id}",
+            get(organizations::get_org_user)
+                .put(organizations::update_org_user)
+                .post(organizations::update_org_user)
+                .delete(organizations::delete_org_user),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/public-keys",
+            post(organizations::post_org_users_public_keys),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies",
+            get(organizations::list_org_policies),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/{policy_type}",
+            get(organizations::get_org_policy),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/{policy_type}/vnext",
+            get(organizations::get_org_policy),
+        )
+        .route(
+            ORG_GROUPS_DETAILS_ROUTE,
+            get(organizations::list_org_groups),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups",
+            get(organizations::list_org_groups).post(organizations::post_org_groups),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/metadata",
+            get(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/vnext",
+            get(organizations::org_billing_metadata)
+                .post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/vnext/warnings",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            ORG_BILLING_SELF_HOST_METADATA_ROUTE,
+            get(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/subscription",
+            get(organizations::org_subscription)
+                .post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/invoices",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/transactions",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/setup-business-unit",
+            post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing",
+            get(organizations::org_billing_metadata).post(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/subscription/update",
+            post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/subscription/plan-change",
+            post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/events",
+            get(organizations::list_org_events),
+        )
+        .route(
+            "/api/organizations/{org_id}/event-logs",
+            get(organizations::list_org_events),
+        )
         // Delete account
         .route("/api/accounts", delete(accounts::delete_account))
         .route("/api/accounts/delete", post(accounts::delete_account))
@@ -75,11 +251,54 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/ciphers", get(ciphers::list_ciphers))
         .route("/api/ciphers", post(ciphers::create_cipher_simple))
         .route("/api/ciphers/create", post(ciphers::create_cipher))
+        .route(
+            "/api/ciphers/organization-details",
+            get(ciphers::list_organization_cipher_details),
+        )
+        .route(
+            "/api/ciphers/organization-details/assigned",
+            get(ciphers::list_organization_cipher_details),
+        )
+        .route(
+            "/api/ciphers/share",
+            post(ciphers::share_ciphers).put(ciphers::share_ciphers),
+        )
+        .route(
+            "/api/ciphers/bulk-collections",
+            post(ciphers::bulk_update_cipher_collections),
+        )
+        .route(
+            "/api/ciphers/admin",
+            post(ciphers::create_cipher).delete(ciphers::hard_delete_ciphers_bulk),
+        )
         .route("/api/ciphers/import", post(import::import_data))
         .route("/api/ciphers/{id}", get(ciphers::get_cipher))
         .route(
+            "/api/ciphers/{id}/admin",
+            get(ciphers::get_cipher)
+                .put(ciphers::update_cipher)
+                .post(ciphers::update_cipher)
+                .delete(ciphers::hard_delete_cipher),
+        )
+        .route(
             "/api/ciphers/{id}/details",
             get(ciphers::get_cipher_details),
+        )
+        .route(
+            "/api/ciphers/{id}/share",
+            post(ciphers::share_cipher).put(ciphers::share_cipher),
+        )
+        .route(
+            "/api/ciphers/{id}/collections",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
+        )
+        .route(
+            "/api/ciphers/{id}/collections_v2",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
+        )
+        .route(
+            "/api/ciphers/{id}/collections-admin",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
         )
         // Attachments
         .route(
@@ -113,6 +332,10 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/ciphers/{id}", post(ciphers::update_cipher))
         // Cipher soft delete (PUT sets deleted_at timestamp)
         .route("/api/ciphers/{id}/delete", put(ciphers::soft_delete_cipher))
+        .route(
+            "/api/ciphers/{id}/delete-admin",
+            put(ciphers::soft_delete_cipher),
+        )
         // Cipher hard delete (DELETE/POST permanently removes cipher)
         .route("/api/ciphers/{id}", delete(ciphers::hard_delete_cipher))
         .route(
@@ -138,11 +361,23 @@ pub fn api_router(env: Env) -> Router {
             "/api/ciphers/delete",
             post(ciphers::hard_delete_ciphers_bulk),
         )
+        .route(
+            "/api/ciphers/delete-admin",
+            put(ciphers::soft_delete_ciphers_bulk).post(ciphers::hard_delete_ciphers_bulk),
+        )
         .route("/api/ciphers", delete(ciphers::hard_delete_ciphers_bulk))
         // Cipher restore (clears deleted_at)
         .route("/api/ciphers/{id}/restore", put(ciphers::restore_cipher))
+        .route(
+            "/api/ciphers/{id}/restore-admin",
+            put(ciphers::restore_cipher),
+        )
         // Cipher bulk restore
         .route("/api/ciphers/restore", put(ciphers::restore_ciphers_bulk))
+        .route(
+            "/api/ciphers/restore-admin",
+            put(ciphers::restore_ciphers_bulk),
+        )
         // Cipher archive (sets archived_at)
         .route("/api/ciphers/{id}/archive", put(ciphers::archive_cipher))
         .route(
@@ -261,4 +496,25 @@ pub fn api_router(env: Env) -> Router {
         )
         .route("/api/two-factor/get-recover", post(twofactor::get_recover))
         .with_state(app_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_host_billing_metadata_route_matches_web_vault_endpoint() {
+        assert_eq!(
+            ORG_BILLING_SELF_HOST_METADATA_ROUTE,
+            "/api/organizations/{org_id}/billing/vnext/self-host/metadata"
+        );
+    }
+
+    #[test]
+    fn org_groups_details_route_matches_web_vault_endpoint() {
+        assert_eq!(
+            ORG_GROUPS_DETAILS_ROUTE,
+            "/api/organizations/{org_id}/groups/details"
+        );
+    }
 }

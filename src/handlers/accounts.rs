@@ -13,7 +13,7 @@ use crate::{
     crypto::{generate_salt, hash_password_for_storage},
     db,
     error::AppError,
-    handlers::{attachments, sends},
+    handlers::{attachments, organizations, sends},
     models::{
         cipher::CipherData,
         device::Device,
@@ -89,6 +89,17 @@ fn ensure_supported_kdf(
     }
 
     Ok(())
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn email_allowed_for_signup(allowed_emails: &str, email: &str) -> bool {
+    let email = normalize_email(email);
+    allowed_emails
+        .split(',')
+        .any(|pattern| glob_match(&pattern.trim().to_ascii_lowercase(), &email))
 }
 
 fn validate_rotation_metadata(
@@ -215,10 +226,8 @@ pub async fn register(
         .as_ref()
         .as_string()
         .ok_or_else(|| AppError::Internal)?;
-    if !allowed_emails
-        .split(',')
-        .any(|pattern| glob_match(pattern.trim(), &payload.email))
-    {
+    let normalized_email = normalize_email(&payload.email);
+    if !email_allowed_for_signup(&allowed_emails, &normalized_email) {
         return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
     }
 
@@ -241,6 +250,7 @@ pub async fn register(
 
     let db = db::get_db(&env)?;
     let now = db::now_string();
+    let existing_user = User::find_by_email(&db, &normalized_email).await?;
 
     // Only store kdf_memory and kdf_parallelism for Argon2id, clear for PBKDF2
     let (kdf_memory, kdf_parallelism) = if payload.kdf == KDF_TYPE_ARGON2ID {
@@ -250,10 +260,13 @@ pub async fn register(
     };
 
     let user = User {
-        id: Uuid::new_v4().to_string(),
+        id: existing_user
+            .as_ref()
+            .map(|user| user.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: payload.name,
         avatar_color: None,
-        email: payload.email.to_lowercase(),
+        email: normalized_email,
         email_verified: false,
         master_password_hash: hashed_password,
         master_password_hint: payload.master_password_hint,
@@ -270,42 +283,85 @@ pub async fn register(
         equivalent_domains: "[]".to_string(),
         excluded_globals: "[]".to_string(),
         totp_recover: None,
-        created_at: now.clone(),
-        updated_at: now,
+        created_at: existing_user
+            .as_ref()
+            .map(|user| user.created_at.clone())
+            .unwrap_or_else(|| now.clone()),
+        updated_at: now.clone(),
     };
 
-    d1_query!(
-        &db,
-        "INSERT INTO users (id, name, email, master_password_hash, master_password_hint, password_salt, password_iterations, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-         user.id,
-         user.name,
-         user.email,
-         user.master_password_hash,
-         user.master_password_hint,
-         user.password_salt,
-         user.password_iterations,
-         user.key,
-         user.private_key,
-         user.public_key,
-         user.kdf_type,
-         user.kdf_iterations,
-         user.kdf_memory,
-         user.kdf_parallelism,
-         user.security_stamp,
-         user.equivalent_domains,
-         user.excluded_globals,
-         user.totp_recover,
-         user.created_at,
-         user.updated_at
-    ).map_err(|_|{
-        AppError::Database
-    })?
-    .run()
-    .await
-    .map_err(|_|{
-        AppError::Database
-    })?;
+    if let Some(existing_user) = existing_user {
+        if existing_user.has_master_password() {
+            return Err(AppError::Conflict("User already exists".to_string()));
+        }
+
+        d1_query!(
+            &db,
+            "UPDATE users \
+             SET name = ?1, email_verified = 0, master_password_hash = ?2, \
+                 master_password_hint = ?3, password_salt = ?4, password_iterations = ?5, \
+                 key = ?6, private_key = ?7, public_key = ?8, kdf_type = ?9, \
+                 kdf_iterations = ?10, kdf_memory = ?11, kdf_parallelism = ?12, \
+                 security_stamp = ?13, equivalent_domains = ?14, excluded_globals = ?15, \
+                 totp_recover = ?16, updated_at = ?17 \
+             WHERE id = ?18",
+            user.name,
+            user.master_password_hash,
+            user.master_password_hint,
+            user.password_salt,
+            user.password_iterations,
+            user.key,
+            user.private_key,
+            user.public_key,
+            user.kdf_type,
+            user.kdf_iterations,
+            user.kdf_memory,
+            user.kdf_parallelism,
+            user.security_stamp,
+            user.equivalent_domains,
+            user.excluded_globals,
+            user.totp_recover,
+            user.updated_at,
+            user.id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    } else {
+        d1_query!(
+            &db,
+            "INSERT INTO users (id, name, email, master_password_hash, master_password_hint, password_salt, password_iterations, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             user.id,
+             user.name,
+             user.email,
+             user.master_password_hash,
+             user.master_password_hint,
+             user.password_salt,
+             user.password_iterations,
+             user.key,
+             user.private_key,
+             user.public_key,
+             user.kdf_type,
+             user.kdf_iterations,
+             user.kdf_memory,
+             user.kdf_parallelism,
+             user.security_stamp,
+             user.equivalent_domains,
+             user.excluded_globals,
+             user.totp_recover,
+             user.created_at,
+             user.updated_at
+        ).map_err(|_|{
+            AppError::Database
+        })?
+        .run()
+        .await
+        .map_err(|_|{
+            AppError::Database
+        })?;
+    }
 
     Ok(Json(json!({})))
 }
@@ -416,6 +472,14 @@ mod tests {
         assert!(!message.contains("my memorable hint"));
         assert!(!message.contains("Your password hint is"));
     }
+
+    #[test]
+    fn signup_allowlist_matches_case_insensitive_domain_patterns() {
+        assert!(email_allowed_for_signup(
+            "*@ssg-healthcare.com",
+            "Invitee@SSG-Healthcare.com"
+        ));
+    }
 }
 
 #[worker::send]
@@ -434,7 +498,8 @@ pub async fn get_profile(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let two_factor_enabled = two_factor_enabled(&db, &user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, &user_id).await?;
 
     Ok(Json(profile))
 }
@@ -481,7 +546,8 @@ pub async fn post_profile(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -548,7 +614,8 @@ pub async fn put_avatar(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -601,11 +668,34 @@ pub async fn delete_account(
     // Delete all user's sends and associated storage objects
     sends::delete_user_sends(&db, env.as_ref(), user_id).await?;
 
-    // Delete all user's ciphers
-    d1_query!(&db, "DELETE FROM ciphers WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+    // Delete only personal ciphers. Organization ciphers stay with the organization even
+    // when their original creator account is removed.
+    d1_query!(
+        &db,
+        "DELETE FROM ciphers WHERE user_id = ?1 AND organization_id IS NULL",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    d1_query!(
+        &db,
+        "DELETE FROM users_collections WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    d1_query!(
+        &db,
+        "DELETE FROM users_organizations WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
 
     // Delete all user's folders
     d1_query!(&db, "DELETE FROM folders WHERE user_id = ?1", user_id)

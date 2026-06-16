@@ -21,6 +21,12 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Too many requests: {0}")]
     TooManyRequests(String),
 
@@ -54,6 +60,8 @@ impl IntoResponse for AppError {
                     AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
                     AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
                     AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
+                    AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+                    AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
                     AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
                     AppError::Crypto(msg) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -70,5 +78,25 @@ impl IntoResponse for AppError {
                 (status, body).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn forbidden_error_maps_to_403() {
+        let response = AppError::Forbidden("Not allowed".to_string()).into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn conflict_error_maps_to_409() {
+        let response = AppError::Conflict("Already exists".to_string()).into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

@@ -4,9 +4,15 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use log::warn;
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use worker::{wasm_bindgen::JsValue, Env, Method, Request, RequestInit};
 
-use crate::push;
+use crate::{
+    db::Db,
+    error::AppError,
+    models::organization::{ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_OWNER},
+    push,
+};
 
 const INTERNAL_FANOUT_URL: &str = "https://notify.internal/fanout";
 pub const RECORD_SEPARATOR: u8 = 0x1e;
@@ -161,6 +167,188 @@ pub fn create_ping() -> Vec<u8> {
     serialize(&Value::Array(vec![6.into()]))
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CipherNotificationContext {
+    pub organization_id: Option<String>,
+    pub collection_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CipherUpdateNotification {
+    pub update_type: UpdateType,
+    pub cipher_id: String,
+    pub revision_date: String,
+    pub context_id: Option<String>,
+    pub cipher_context: CipherNotificationContext,
+}
+
+impl CipherUpdateNotification {
+    pub fn new(
+        update_type: UpdateType,
+        cipher_id: String,
+        revision_date: String,
+        context_id: Option<String>,
+        cipher_context: CipherNotificationContext,
+    ) -> Self {
+        Self {
+            update_type,
+            cipher_id,
+            revision_date,
+            context_id,
+            cipher_context,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CipherNotificationTarget {
+    user_id: String,
+    context_id: Option<String>,
+}
+
+fn cipher_notification_targets(
+    actor_user_id: &str,
+    recipient_user_ids: Vec<String>,
+    actor_context_id: Option<String>,
+) -> Vec<CipherNotificationTarget> {
+    let mut targets = Vec::new();
+    targets.push(CipherNotificationTarget {
+        user_id: actor_user_id.to_string(),
+        context_id: actor_context_id,
+    });
+
+    for recipient_user_id in recipient_user_ids {
+        if targets
+            .iter()
+            .any(|target| target.user_id == recipient_user_id)
+        {
+            continue;
+        }
+        targets.push(CipherNotificationTarget {
+            user_id: recipient_user_id,
+            context_id: None,
+        });
+    }
+
+    targets
+}
+
+async fn cipher_notification_recipient_user_ids(
+    db: &Db,
+    actor_user_id: &str,
+    cipher_id: &str,
+    context: &CipherNotificationContext,
+) -> Result<Vec<String>, AppError> {
+    let Some(org_id) = context.organization_id.as_deref() else {
+        return Ok(vec![actor_user_id.to_string()]);
+    };
+
+    let rows = if let Some(collection_ids) = context.collection_ids.as_ref() {
+        let collection_ids_json =
+            serde_json::to_string(collection_ids).map_err(|_| AppError::Internal)?;
+        db.prepare(
+            "SELECT DISTINCT uo.user_id \
+             FROM users_organizations uo \
+             WHERE uo.organization_id = ?1 \
+                AND uo.status = ?4 \
+                AND ( \
+                    uo.access_all = 1 \
+                    OR uo.type IN (?2, ?3) \
+                    OR EXISTS ( \
+                        SELECT 1 \
+                        FROM users_collections uc \
+                        WHERE uc.user_id = uo.user_id \
+                            AND uc.collection_id IN (SELECT value FROM json_each(?5, '$')) \
+                    ) \
+                )",
+        )
+        .bind(&[
+            org_id.into(),
+            ORG_USER_TYPE_OWNER.into(),
+            ORG_USER_TYPE_ADMIN.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+            collection_ids_json.into(),
+        ])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results::<JsonValue>()
+        .unwrap_or_default()
+    } else {
+        db.prepare(
+            "SELECT DISTINCT uo.user_id \
+             FROM users_organizations uo \
+             WHERE uo.organization_id = ?1 \
+                AND uo.status = ?4 \
+                AND ( \
+                    uo.access_all = 1 \
+                    OR uo.type IN (?2, ?3) \
+                    OR EXISTS ( \
+                        SELECT 1 \
+                        FROM ciphers_collections cc \
+                        JOIN users_collections uc \
+                            ON uc.collection_id = cc.collection_id \
+                            AND uc.user_id = uo.user_id \
+                        WHERE cc.cipher_id = ?5 \
+                    ) \
+                )",
+        )
+        .bind(&[
+            org_id.into(),
+            ORG_USER_TYPE_OWNER.into(),
+            ORG_USER_TYPE_ADMIN.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+            cipher_id.into(),
+        ])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results::<JsonValue>()
+        .unwrap_or_default()
+    };
+
+    let recipient_user_ids = rows
+        .into_iter()
+        .filter_map(|row| {
+            row.get("user_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    Ok(recipient_user_ids)
+}
+
+fn cipher_collection_ids_value(collection_ids: Option<&[String]>) -> Value {
+    collection_ids
+        .map(|ids| Value::Array(ids.iter().map(|id| id.as_str().into()).collect()))
+        .unwrap_or(Value::Nil)
+}
+
+fn cipher_update_payload(
+    user_id: &str,
+    cipher_id: &str,
+    revision_date: &str,
+    context: &CipherNotificationContext,
+) -> Vec<(Value, Value)> {
+    vec![
+        ("Id".into(), cipher_id.into()),
+        ("UserId".into(), user_id.into()),
+        (
+            "OrganizationId".into(),
+            convert_option(context.organization_id.as_deref()),
+        ),
+        (
+            "CollectionIds".into(),
+            cipher_collection_ids_value(context.collection_ids.as_deref()),
+        ),
+        (
+            "RevisionDate".into(),
+            serialize_date(parse_timestamp(revision_date)),
+        ),
+    ]
+}
+
 // ── DO fan-out protocol ─────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -272,6 +460,78 @@ pub fn publish_user_logout(env: Env, user_id: String, date: String, context_id: 
     publish_user_update(env, user_id, UpdateType::LogOut, date, context_id)
 }
 
+async fn org_scope_notification_recipient_user_ids(
+    db: &Db,
+    actor_user_id: &str,
+    organization_ids: &[String],
+) -> Result<Vec<String>, AppError> {
+    if organization_ids.is_empty() {
+        return Ok(vec![actor_user_id.to_string()]);
+    }
+
+    let organization_ids_json =
+        serde_json::to_string(organization_ids).map_err(|_| AppError::Internal)?;
+    let rows = db
+        .prepare(
+            "SELECT DISTINCT user_id \
+             FROM users_organizations \
+             WHERE status = ?1 \
+                AND organization_id IN (SELECT value FROM json_each(?2, '$'))",
+        )
+        .bind(&[
+            ORG_USER_STATUS_CONFIRMED.into(),
+            organization_ids_json.into(),
+        ])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results::<JsonValue>()
+        .unwrap_or_default();
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            row.get("user_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect())
+}
+
+pub async fn publish_user_update_for_scopes(
+    db: &Db,
+    env: Env,
+    actor_user_id: String,
+    organization_ids: Vec<String>,
+    update_type: UpdateType,
+    date: String,
+    context_id: Option<String>,
+) {
+    let recipient_user_ids = match org_scope_notification_recipient_user_ids(
+        db,
+        &actor_user_id,
+        &organization_ids,
+    )
+    .await
+    {
+        Ok(recipient_user_ids) => recipient_user_ids,
+        Err(error) => {
+            warn!("Failed to resolve scoped notification recipients: {error}");
+            vec![actor_user_id.clone()]
+        }
+    };
+
+    for target in cipher_notification_targets(&actor_user_id, recipient_user_ids, context_id) {
+        publish_user_update(
+            env.clone(),
+            target.user_id,
+            update_type,
+            date.clone(),
+            target.context_id,
+        );
+    }
+}
+
 pub fn publish_folder_update(
     env: Env,
     user_id: String,
@@ -316,33 +576,95 @@ pub fn publish_cipher_update(
     revision_date: String,
     context_id: Option<String>,
 ) {
+    publish_cipher_update_with_context(
+        env,
+        user_id,
+        update_type,
+        cipher_id,
+        revision_date,
+        context_id,
+        CipherNotificationContext::default(),
+    );
+}
+
+pub async fn publish_cipher_update_for_scope(
+    db: &Db,
+    env: Env,
+    actor_user_id: String,
+    notification: CipherUpdateNotification,
+) {
+    let recipient_user_ids = match cipher_notification_recipient_user_ids(
+        db,
+        &actor_user_id,
+        &notification.cipher_id,
+        &notification.cipher_context,
+    )
+    .await
+    {
+        Ok(recipient_user_ids) => recipient_user_ids,
+        Err(error) => {
+            let cipher_id = &notification.cipher_id;
+            warn!("Failed to resolve notification recipients for cipher {cipher_id}: {error}");
+            vec![actor_user_id.clone()]
+        }
+    };
+
+    publish_cipher_update_to_users(env, actor_user_id, recipient_user_ids, notification);
+}
+
+pub fn publish_cipher_update_to_users(
+    env: Env,
+    actor_user_id: String,
+    recipient_user_ids: Vec<String>,
+    notification: CipherUpdateNotification,
+) {
+    for target in cipher_notification_targets(
+        &actor_user_id,
+        recipient_user_ids,
+        notification.context_id.clone(),
+    ) {
+        publish_cipher_update_with_context(
+            env.clone(),
+            target.user_id,
+            notification.update_type,
+            notification.cipher_id.clone(),
+            notification.revision_date.clone(),
+            target.context_id,
+            notification.cipher_context.clone(),
+        );
+    }
+}
+
+pub fn publish_cipher_update_with_context(
+    env: Env,
+    user_id: String,
+    update_type: UpdateType,
+    cipher_id: String,
+    revision_date: String,
+    context_id: Option<String>,
+    cipher_context: CipherNotificationContext,
+) {
     crate::background::spawn_background(async move {
         let ws_bytes = create_update(
-            vec![
-                ("Id".into(), cipher_id.as_str().into()),
-                // Org feature is not supported,
-                // so we simply set all related parameters to null.
-                ("UserId".into(), user_id.as_str().into()),
-                ("OrganizationId".into(), Value::Nil),
-                ("CollectionIds".into(), Value::Nil),
-                (
-                    "RevisionDate".into(),
-                    serialize_date(parse_timestamp(&revision_date)),
-                ),
-            ],
+            cipher_update_payload(&user_id, &cipher_id, &revision_date, &cipher_context),
             update_type as i32,
             context_id.as_deref(),
         );
+        let push_context = push::CipherPushContext {
+            organization_id: cipher_context.organization_id,
+            collection_ids: cipher_context.collection_ids,
+        };
         let selector = PublishSelector::user(&user_id);
         futures_util::join!(
             send_ws_to_do(&env, &selector, &ws_bytes),
-            push::push_cipher_update(
+            push::push_cipher_update_with_context(
                 &env,
                 &user_id,
                 update_type as i32,
                 &cipher_id,
                 &revision_date,
                 context_id.as_deref(),
+                push_context,
             ),
         );
     });
@@ -529,4 +851,72 @@ fn parse_timestamp(date: &str) -> NaiveDateTime {
             warn!("Failed to parse RFC3339 timestamp '{date}': {error}");
             Utc::now().naive_utc()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_payload_value<'a>(payload: &'a [(Value, Value)], key: &str) -> &'a Value {
+        payload
+            .iter()
+            .find_map(|(payload_key, payload_value)| {
+                (payload_key.as_str() == Some(key)).then_some(payload_value)
+            })
+            .expect("payload key should exist")
+    }
+
+    #[test]
+    fn cipher_update_payload_includes_org_and_collection_context() {
+        let context = CipherNotificationContext {
+            organization_id: Some("org-1".to_string()),
+            collection_ids: Some(vec!["collection-1".to_string(), "collection-2".to_string()]),
+        };
+
+        let payload = cipher_update_payload("user-1", "cipher-1", "2026-06-15T12:00:00Z", &context);
+
+        assert_eq!(
+            find_payload_value(&payload, "OrganizationId"),
+            &Value::from("org-1")
+        );
+        assert_eq!(
+            find_payload_value(&payload, "CollectionIds"),
+            &Value::Array(vec![
+                Value::from("collection-1"),
+                Value::from("collection-2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn cipher_notification_targets_dedupe_and_keep_actor_context_only_for_actor() {
+        let targets = cipher_notification_targets(
+            "actor-user",
+            vec![
+                "other-user".to_string(),
+                "actor-user".to_string(),
+                "other-user".to_string(),
+                "third-user".to_string(),
+            ],
+            Some("actor-device".to_string()),
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                CipherNotificationTarget {
+                    user_id: "actor-user".to_string(),
+                    context_id: Some("actor-device".to_string()),
+                },
+                CipherNotificationTarget {
+                    user_id: "other-user".to_string(),
+                    context_id: None,
+                },
+                CipherNotificationTarget {
+                    user_id: "third-user".to_string(),
+                    context_id: None,
+                },
+            ]
+        );
+    }
 }

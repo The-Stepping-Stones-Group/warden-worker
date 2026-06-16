@@ -19,23 +19,32 @@ use crate::models::attachment::AttachmentResponse;
 #[serde(rename_all = "camelCase")]
 pub struct CipherTypeFields {
     // Only one of these should exist, depending on cipher type
+    #[serde(alias = "Login")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<Value>,
+    #[serde(alias = "Card")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<Value>,
+    #[serde(alias = "Identity")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<Value>,
+    #[serde(alias = "SecureNote")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure_note: Option<Value>,
+    #[serde(alias = "SshKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<Value>,
     // Common fields
+    #[serde(alias = "Fields")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<Value>,
+    #[serde(alias = "PasswordHistory")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_history: Option<Value>,
+    #[serde(alias = "Reprompt")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reprompt: Option<i32>,
+    #[serde(alias = "Key")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -131,12 +140,13 @@ where
 }
 
 // Custom deserialization function for cipher types
-fn deserialize_cipher_type<'de, D>(deserializer: D) -> Result<i32, D::Error>
+fn deserialize_cipher_type_or_unknown<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = i32::deserialize(deserializer)?;
     match value {
+        0 => Ok(value), // Some web-vault SDK envelopes omit type; handlers infer it later.
         1..=5 => Ok(value), // Valid cipher types: Login, SecureNote, Card, Identity, SshKey
         _ => Err(de::Error::invalid_value(
             de::Unexpected::Signed(value as i64),
@@ -348,6 +358,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_unknown_cipher_type() -> i32 {
+    0
+}
+
 /// Represents the "Cipher" object within incoming request payloads.
 /// Used for create, update, import, and key rotation scenarios.
 /// Aligned with vaultwarden's CipherData structure.
@@ -355,32 +369,90 @@ fn default_true() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct CipherRequestData {
     // Id is optional as it is included only in bulk share / key rotation
+    #[serde(alias = "Id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     // Folder id is not included in import (determined by folder_relationships)
-    #[serde(default, deserialize_with = "super::deser_opt_nonempty_str")]
+    #[serde(
+        default,
+        alias = "FolderId",
+        alias = "FolderID",
+        deserialize_with = "super::deser_opt_nonempty_str"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
-    #[serde(alias = "organizationID")]
+    #[serde(
+        alias = "organizationID",
+        alias = "OrganizationId",
+        alias = "OrganizationID"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
-    #[serde(rename = "type")]
-    #[serde(deserialize_with = "deserialize_cipher_type")]
+    #[serde(rename = "type", alias = "Type")]
+    #[serde(
+        default = "default_unknown_cipher_type",
+        deserialize_with = "deserialize_cipher_type_or_unknown"
+    )]
     pub r#type: i32,
+    #[serde(alias = "Name")]
     pub name: String,
+    #[serde(alias = "Notes")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(alias = "Favorite")]
     #[serde(default)]
     pub favorite: Option<bool>,
     #[serde(flatten)]
     pub type_fields: CipherTypeFields,
     /// Used during key rotation to update attachment keys and encrypted filenames.
+    #[serde(alias = "Attachments2")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments2: Option<HashMap<String, Attachments2Data>>,
+    #[serde(
+        default,
+        alias = "CollectionIds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection_ids: Option<Vec<String>>,
     // The revision datetime (in ISO 8601 format) of the client's local copy
     // Used to prevent updating a cipher when client doesn't have the latest version
+    #[serde(alias = "LastKnownRevisionDate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_known_revision_date: Option<String>,
+}
+
+impl CipherRequestData {
+    pub fn resolved_type(&self) -> Option<i32> {
+        if (1..=5).contains(&self.r#type) {
+            return Some(self.r#type);
+        }
+
+        let mut inferred_types = Vec::new();
+        if type_payload_present(&self.type_fields.login) {
+            inferred_types.push(1);
+        }
+        if type_payload_present(&self.type_fields.secure_note) {
+            inferred_types.push(2);
+        }
+        if type_payload_present(&self.type_fields.card) {
+            inferred_types.push(3);
+        }
+        if type_payload_present(&self.type_fields.identity) {
+            inferred_types.push(4);
+        }
+        if type_payload_present(&self.type_fields.ssh_key) {
+            inferred_types.push(5);
+        }
+
+        match inferred_types.as_slice() {
+            [cipher_type] => Some(*cipher_type),
+            _ => None,
+        }
+    }
+}
+
+fn type_payload_present(value: &Option<Value>) -> bool {
+    value.as_ref().is_some_and(|value| !value.is_null())
 }
 
 /// Attachment metadata sent by clients during key rotation.
@@ -421,4 +493,66 @@ pub struct PartialCipherData {
     #[serde(default, deserialize_with = "super::deser_opt_nonempty_str")]
     pub folder_id: Option<String>,
     pub favorite: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cipher_request_resolves_explicit_type() {
+        let payload: CipherRequestData = serde_json::from_value(json!({
+            "type": 1,
+            "name": "encrypted-name",
+            "login": {"username": "encrypted-user"}
+        }))
+        .unwrap();
+
+        assert_eq!(payload.resolved_type(), Some(1));
+    }
+
+    #[test]
+    fn cipher_request_infers_missing_type_from_login_payload() {
+        let payload: CipherRequestData = serde_json::from_value(json!({
+            "name": "encrypted-name",
+            "login": {
+                "username": "encrypted-user",
+                "password": "encrypted-password"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(payload.r#type, 0);
+        assert_eq!(payload.resolved_type(), Some(1));
+    }
+
+    #[test]
+    fn cipher_request_rejects_ambiguous_missing_type() {
+        let payload: CipherRequestData = serde_json::from_value(json!({
+            "name": "encrypted-name",
+            "login": {},
+            "card": {}
+        }))
+        .unwrap();
+
+        assert_eq!(payload.resolved_type(), None);
+    }
+
+    #[test]
+    fn create_cipher_request_accepts_sdk_envelope_without_type() {
+        let payload: CreateCipherRequest = serde_json::from_value(json!({
+            "Cipher": {
+                "OrganizationId": "org-1",
+                "Name": "encrypted-name",
+                "Login": {"Username": "encrypted-user"}
+            },
+            "CollectionIds": ["collection-1"]
+        }))
+        .unwrap();
+
+        assert_eq!(payload.collection_ids, vec!["collection-1"]);
+        assert_eq!(payload.cipher.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(payload.cipher.name, "encrypted-name");
+        assert_eq!(payload.cipher.resolved_type(), Some(1));
+    }
 }

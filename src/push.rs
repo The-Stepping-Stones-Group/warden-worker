@@ -240,13 +240,17 @@ pub async fn send_to_push_relay(cfg: &PushConfig, payload: &Value) -> Result<(),
     post_to_relay(&url, &token, payload, false).await
 }
 
-// In this project, org feature is not supported, so we set organizationId and collectionIds to null
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DevicePushInfo {
     pub push_uuid: Option<String>,
     pub identifier: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CipherPushContext {
+    pub organization_id: Option<String>,
+    pub collection_ids: Option<Vec<String>>,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -468,6 +472,53 @@ pub async fn push_cipher_update(
     revision_date: &str,
     context_id: Option<&str>,
 ) {
+    push_cipher_update_with_context(
+        env,
+        user_id,
+        update_type,
+        cipher_id,
+        revision_date,
+        context_id,
+        CipherPushContext::default(),
+    )
+    .await;
+}
+
+pub(crate) fn build_cipher_push_payload(
+    user_id: &str,
+    update_type: i32,
+    cipher_id: &str,
+    revision_date: &str,
+    device: Option<&DevicePushInfo>,
+    context: &CipherPushContext,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": context.organization_id.as_deref(),
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "id": cipher_id,
+            "userId": user_id,
+            "organizationId": context.organization_id.as_deref(),
+            "collectionIds": context.collection_ids.as_ref(),
+            "revisionDate": revision_date,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+pub async fn push_cipher_update_with_context(
+    env: &Env,
+    user_id: &str,
+    update_type: i32,
+    cipher_id: &str,
+    revision_date: &str,
+    context_id: Option<&str>,
+    context: CipherPushContext,
+) {
     let Some(cfg) = try_get_push_config(env) else {
         return;
     };
@@ -475,22 +526,14 @@ pub async fn push_cipher_update(
         return;
     }
     let device = resolve_device_info(env, user_id, context_id).await;
-    let payload = json!({
-        "userId": user_id,
-        "organizationId": null,
-        "deviceId": device.as_ref().and_then(|d| d.push_uuid.as_deref()),
-        "identifier": device.as_ref().map(|d| d.identifier.as_str()),
-        "type": update_type,
-        "payload": {
-            "id": cipher_id,
-            "userId": user_id,
-            "organizationId": null,
-            "collectionIds": null,
-            "revisionDate": revision_date,
-        },
-        "clientType": null,
-        "installationId": null,
-    });
+    let payload = build_cipher_push_payload(
+        user_id,
+        update_type,
+        cipher_id,
+        revision_date,
+        device.as_ref(),
+        &context,
+    );
     if let Err(e) = send_to_push_relay(&cfg, &payload).await {
         log::warn!("Push relay failed for cipher_update: {e}");
     }
@@ -559,5 +602,38 @@ pub async fn push_auth_update(
     });
     if let Err(e) = send_to_push_relay(&cfg, &payload).await {
         log::warn!("Push relay failed for auth update (type {update_type}): {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cipher_push_payload_includes_org_and_collection_context() {
+        let device = DevicePushInfo {
+            push_uuid: Some("push-uuid-1".to_string()),
+            identifier: "device-1".to_string(),
+        };
+        let context = CipherPushContext {
+            organization_id: Some("org-1".to_string()),
+            collection_ids: Some(vec!["collection-1".to_string(), "collection-2".to_string()]),
+        };
+
+        let payload = build_cipher_push_payload(
+            "user-1",
+            1,
+            "cipher-1",
+            "2026-06-15T12:00:00Z",
+            Some(&device),
+            &context,
+        );
+
+        assert_eq!(payload["organizationId"], json!("org-1"));
+        assert_eq!(payload["payload"]["organizationId"], json!("org-1"));
+        assert_eq!(
+            payload["payload"]["collectionIds"],
+            json!(["collection-1", "collection-2"])
+        );
     }
 }

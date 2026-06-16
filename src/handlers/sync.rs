@@ -7,7 +7,7 @@ use crate::{
     db,
     error::AppError,
     handlers::{
-        attachments, ciphers, ciphers_default_row_query, domains, sends,
+        attachments, ciphers, ciphers_default_row_query, domains, organizations, sends,
         sync_response_prealloc_bytes, two_factor_enabled,
     },
     models::{
@@ -79,6 +79,7 @@ pub async fn get_sync_data(
         .results()?;
 
     let folders: Vec<FolderResponse> = folders_db.into_iter().map(|f| f.into()).collect();
+    let collections_json = organizations::visible_collections_for_user_json(&db, &user_id).await?;
 
     // Fetch ciphers as raw JSON array string (no parsing in Rust!)
     let include_attachments = attachments::attachments_enabled(env.as_ref());
@@ -86,6 +87,7 @@ pub async fn get_sync_data(
 
     // Serialize profile and folders (small data, acceptable CPU cost)
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, &user_id).await?;
     // Match vaultwarden semantics: `_status` is `Invited` when no master password is set.
     // We don't implement org invitations, but this helps clients interpret the account state.
     profile.status = if has_master_password { 0 } else { 1 };
@@ -123,15 +125,22 @@ pub async fn get_sync_data(
     response.push_str(&profile_json);
     response.push_str(",\"folders\":");
     response.push_str(&folders_json);
-    response.push_str(",\"collections\":[],\"policies\":[],\"ciphers\":");
+    response.push_str(",\"collections\":");
+    response.push_str(&collections_json);
+    response.push_str(",\"policies\":[],\"ciphers\":");
+    let visible_ciphers_where = format!("WHERE {}", ciphers::visible_cipher_where_clause());
+    let visible_ciphers_params = ciphers::visible_cipher_params(&user_id);
     ciphers::append_cipher_json_array_raw(
         &mut response,
         &db,
         include_attachments,
-        "WHERE c.user_id = ?1",
-        &[user_id.clone().into()],
+        &visible_ciphers_where,
+        &visible_ciphers_params,
         "",
-        force_row_query,
+        ciphers::CipherJsonRenderOptions {
+            force_row_query,
+            include_access_fields: true,
+        },
     )
     .await?;
 
