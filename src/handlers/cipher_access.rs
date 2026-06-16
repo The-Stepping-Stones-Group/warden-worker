@@ -42,6 +42,14 @@ impl CipherAccessView {
             || !self.hide_passwords
     }
 
+    pub fn can_read_attachment(&self) -> bool {
+        true
+    }
+
+    pub fn can_write_attachment(&self) -> bool {
+        self.can_edit()
+    }
+
     #[allow(dead_code)]
     pub fn collection_json_array(&self) -> String {
         serde_json::to_string(&self.collection_ids).unwrap_or_else(|_| "[]".to_string())
@@ -254,5 +262,23 @@ mod tests {
         assert!(view.can_edit());
         assert!(view.can_delete_or_restore());
         assert!(view.can_view_password());
+    }
+
+    #[test]
+    fn read_only_member_can_download_but_not_upload_attachment() {
+        let view = CipherAccessView {
+            cipher_id: "cipher-1".into(),
+            owner_user_id: Some("owner".into()),
+            organization_id: Some("org-1".into()),
+            collection_ids: vec!["collection-1".into()],
+            read_only: true,
+            hide_passwords: false,
+            manage: false,
+            member_type: Some(ORG_USER_TYPE_USER),
+            access_all: false,
+        };
+
+        assert!(view.can_read_attachment());
+        assert!(!view.can_write_attachment());
     }
 }

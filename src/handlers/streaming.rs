@@ -5,7 +5,7 @@ use worker::{Env, Headers, HttpMetadata, Method, Request, Response, Url};
 
 use crate::{
     auth::jwt_time_options,
-    db::{self, touch_user_updated_at},
+    db,
     error::AppError,
     handlers::attachments::{
         self, get_storage_backend, jwt_secret, AttachmentClaims, StorageBackend,
@@ -118,7 +118,8 @@ async fn handle_attachment_upload(
         Some(claims.device.as_str())
     };
 
-    attachments::ensure_cipher_for_user(&db, cipher_id, user_id).await?;
+    let (_cipher, access) =
+        attachments::ensure_cipher_attachment_write(&db, cipher_id, user_id).await?;
     let pending = attachments::fetch_pending_attachment(&db, attachment_id).await?;
     if pending.cipher_id != cipher_id {
         return Err(bad("Attachment does not belong to cipher"));
@@ -152,7 +153,7 @@ async fn handle_attachment_upload(
 
     let mut pending = pending;
     let now = pending.finalize_pending(&db).await?;
-    touch_user_updated_at(&db, user_id, &now).await?;
+    attachments::touch_attachment_scope_updated_at(&db, user_id, &access, &now).await?;
 
     notifications::publish_cipher_update(
         env.clone(),
@@ -183,7 +184,8 @@ async fn handle_attachment_download(
         return Err(AppError::Unauthorized("Invalid token".into()));
     }
 
-    let _cipher = attachments::ensure_cipher_for_user(&db, cipher_id, &claims.sub).await?;
+    let (_cipher, _access) =
+        attachments::ensure_cipher_attachment_read(&db, cipher_id, &claims.sub).await?;
     let attachment = attachments::fetch_attachment(&db, attachment_id).await?;
     if attachment.cipher_id != cipher_id {
         return Err(bad("Attachment does not belong to cipher"));

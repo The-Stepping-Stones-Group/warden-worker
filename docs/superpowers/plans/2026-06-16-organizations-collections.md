@@ -1044,7 +1044,7 @@ git commit -m "feat: enforce organization cipher access"
 - Modify: `src/handlers/streaming.rs`
 - Modify: `src/handlers/cipher_access.rs`
 
-- [ ] **Step 1: Write failing attachment permission tests**
+- [x] **Step 1: Write failing attachment permission tests**
 
 Add pure tests in `src/handlers/cipher_access.rs`:
 
@@ -1068,7 +1068,7 @@ fn read_only_member_can_download_but_not_upload_attachment() {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -1078,15 +1078,15 @@ cargo test --locked read_only_member_can_download_but_not_upload_attachment --li
 
 Expected: fail because attachment permission methods do not exist.
 
-- [ ] **Step 3: Replace `ensure_cipher_for_user` behavior**
+- [x] **Step 3: Replace `ensure_cipher_for_user` behavior**
 
 Change attachment auth so it accepts personal ciphers and org ciphers visible through the shared helper. Remove the `"Organization attachments are not supported"` rejection. Store pending and finalized `organization_id` from the cipher row.
 
-- [ ] **Step 4: Update streaming upload/download**
+- [x] **Step 4: Update streaming upload/download**
 
 Use `ensure_cipher_read` for downloads and `ensure_cipher_write` for uploads/finalization. Keep token claim checks unchanged.
 
-- [ ] **Step 5: Verify green**
+- [x] **Step 5: Verify green**
 
 Run:
 
@@ -1098,7 +1098,7 @@ cargo fmt -- --check
 
 Expected: all local tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/handlers/attachments.rs src/handlers/streaming.rs src/handlers/cipher_access.rs
