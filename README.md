@@ -17,6 +17,7 @@ Warden aims to solve this problem by leveraging the Cloudflare Workers ecosystem
 * **Core Vault Functionality:** Create, read, update, and delete ciphers and folders.
 * **File Attachments:** Optional Cloudflare KV or R2 storage for attachments.
 * **Bitwarden Send:** Share encrypted text or files via a link.
+* **Organization Sharing:** Create organizations, invite members, create collections, and share ciphers into collections.
 * **Device Management:** View and revoke active sessions.
 * **Live Sync & Push Notifications:** Real-time vault updates via WebSocket and mobile push.
 * **TOTP Support:** Store and generate Time-based One-Time Passwords.
@@ -51,16 +52,18 @@ See the [deployment guide](docs/deployment.md) for setup details. R2 may incur a
 
 ## Current Status
 
-**This project is not yet feature-complete**, ~~and it may never be~~. It currently supports the core functionality of a personal vault, including TOTP. However, it does **not** support the following features:
+**This project is not yet feature-complete**, ~~and it may never be~~. It supports personal vaults, TOTP, Sends, attachments, and a focused organization/collection sharing surface. Organization support includes organization creation, membership invitation/confirmation, collections, cipher sharing, collection assignment, sync/profile visibility, access checks, and attachment access checks.
 
-* Sharing
+It still does **not** support the following advanced Bitwarden features:
+
 * 2FA login (except TOTP)
 * Emergency access
-* Admin operations
-* Organizations
+* Billing, subscriptions, license management, and organization payment flows
+* Groups, SCIM, SSO, domain verification, events, reports, and enterprise policy enforcement
+* Full admin-console parity with Bitwarden or Vaultwarden
 * Other Bitwarden advanced features
 
-There are no immediate plans to implement these features. The primary goal of this project is to provide a simple, free, and low-maintenance personal password manager.
+Unsupported enterprise surfaces return disabled or empty compatibility responses where the bundled web vault probes them, so clients can continue to use the supported organization sharing flows without hard 404s.
 
 ## Compatibility
 

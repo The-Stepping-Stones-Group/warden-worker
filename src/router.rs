@@ -46,6 +46,10 @@ pub fn api_router(env: Env) -> Router {
             post(organizations::create_organization),
         )
         .route(
+            "/api/organizations/create-without-payment",
+            post(organizations::create_organization),
+        )
+        .route(
             "/api/organizations/{org_id}",
             get(organizations::get_organization)
                 .put(organizations::update_organization)
@@ -68,6 +72,11 @@ pub fn api_router(env: Env) -> Router {
             get(organizations::list_org_collections_details),
         )
         .route(
+            "/api/organizations/{org_id}/collections/bulk-access",
+            get(organizations::list_org_compatibility_empty)
+                .post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
             "/api/organizations/{org_id}/collections/{collection_id}",
             put(organizations::update_collection)
                 .post(organizations::update_collection)
@@ -79,8 +88,16 @@ pub fn api_router(env: Env) -> Router {
             get(organizations::list_org_users),
         )
         .route(
+            "/api/organizations/{org_id}/members",
+            get(organizations::list_org_users),
+        )
+        .route(
             "/api/organizations/{org_id}/users/invite",
             post(organizations::invite_org_users),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/mini-details",
+            get(organizations::list_org_users),
         )
         .route(
             "/api/organizations/{org_id}/users/{member_id}/accept",
@@ -102,6 +119,13 @@ pub fn api_router(env: Env) -> Router {
                 .delete(organizations::delete_org_user),
         )
         .route(
+            "/api/organizations/{org_id}/members/{member_id}",
+            get(organizations::get_org_user)
+                .put(organizations::update_org_user)
+                .post(organizations::update_org_user)
+                .delete(organizations::delete_org_user),
+        )
+        .route(
             "/api/organizations/{org_id}/users/public-keys",
             post(organizations::post_org_users_public_keys),
         )
@@ -114,6 +138,10 @@ pub fn api_router(env: Env) -> Router {
             get(organizations::get_org_policy),
         )
         .route(
+            "/api/organizations/{org_id}/policies/{policy_type}/vnext",
+            get(organizations::get_org_policy),
+        )
+        .route(
             "/api/organizations/{org_id}/groups",
             get(organizations::list_org_groups).post(organizations::post_org_groups),
         )
@@ -122,8 +150,42 @@ pub fn api_router(env: Env) -> Router {
             get(organizations::org_billing_metadata),
         )
         .route(
+            "/api/organizations/{org_id}/billing/vnext",
+            get(organizations::org_billing_metadata)
+                .post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/vnext/warnings",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/subscription",
+            get(organizations::org_subscription)
+                .post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/invoices",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/transactions",
+            get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            "/api/organizations/{org_id}/billing/setup-business-unit",
+            post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
             "/api/organizations/{org_id}/billing",
             get(organizations::org_billing_metadata).post(organizations::org_billing_metadata),
+        )
+        .route(
+            "/api/organizations/{org_id}/subscription/update",
+            post(organizations::unsupported_org_feature_mutation),
+        )
+        .route(
+            "/api/organizations/{org_id}/subscription/plan-change",
+            post(organizations::unsupported_org_feature_mutation),
         )
         .route(
             "/api/organizations/{org_id}/events",

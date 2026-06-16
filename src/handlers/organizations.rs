@@ -276,6 +276,20 @@ fn list_response(data: Vec<Value>) -> Value {
     })
 }
 
+fn org_compatibility_empty_list() -> Value {
+    list_response(Vec::new())
+}
+
+fn org_subscription_stub(org_id: &str) -> Value {
+    json!({
+        "object": "organizationSubscription",
+        "organizationId": org_id,
+        "enabled": false,
+        "status": "unsupported",
+        "plan": null
+    })
+}
+
 fn organization_permissions_json(member_type: Option<i32>) -> Value {
     let can_manage_collections = member_type.map(is_org_admin_type).unwrap_or(false);
     json!({
@@ -1844,6 +1858,41 @@ pub async fn list_org_events(
     Ok(Json(list_response(Vec::new())))
 }
 
+#[worker::send]
+pub async fn list_org_compatibility_empty(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    ensure_org_member(&db, &org_id, &claims.sub).await?;
+    Ok(Json(org_compatibility_empty_list()))
+}
+
+#[worker::send]
+pub async fn org_subscription(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    ensure_org_member(&db, &org_id, &claims.sub).await?;
+    Ok(Json(org_subscription_stub(&org_id)))
+}
+
+#[worker::send]
+pub async fn unsupported_org_feature_mutation(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    ensure_org_admin(&db, &org_id, &claims.sub).await?;
+    Err(AppError::BadRequest(
+        "This organization feature is not supported".to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1991,6 +2040,27 @@ mod tests {
             Value::String("encrypted-private".into())
         );
         assert_eq!(value["publicKey"], Value::String("public".into()));
+    }
+
+    #[test]
+    fn org_compatibility_empty_list_uses_bitwarden_list_shape() {
+        let value = org_compatibility_empty_list();
+
+        assert_eq!(value["object"], Value::String("list".into()));
+        assert_eq!(value["data"], Value::Array(Vec::new()));
+        assert_eq!(value["continuationToken"], Value::Null);
+    }
+
+    #[test]
+    fn org_subscription_stub_is_disabled_and_scoped_to_org() {
+        let value = org_subscription_stub("org-1");
+
+        assert_eq!(
+            value["object"],
+            Value::String("organizationSubscription".into())
+        );
+        assert_eq!(value["organizationId"], Value::String("org-1".into()));
+        assert_eq!(value["enabled"], Value::Bool(false));
     }
 
     #[test]

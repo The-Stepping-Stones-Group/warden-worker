@@ -155,14 +155,19 @@ async fn handle_attachment_upload(
     let now = pending.finalize_pending(&db).await?;
     attachments::touch_attachment_scope_updated_at(&db, user_id, &access, &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         env.clone(),
         user_id.to_string(),
-        UpdateType::SyncCipherUpdate,
-        cipher_id.to_string(),
-        now,
-        context_id.map(|s| s.to_string()),
-    );
+        notifications::CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher_id.to_string(),
+            now,
+            context_id.map(|s| s.to_string()),
+            attachments::cipher_notification_context_from_access(&access),
+        ),
+    )
+    .await;
 
     ok_empty(201)
 }

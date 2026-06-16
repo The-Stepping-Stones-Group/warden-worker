@@ -25,7 +25,7 @@ use crate::{
         attachment::{AttachmentDB, AttachmentResponse},
         cipher::{Cipher, CipherDBModel},
     },
-    notifications::{self, UpdateType},
+    notifications::{self, CipherNotificationContext, CipherUpdateNotification, UpdateType},
     BaseUrl,
 };
 
@@ -166,6 +166,19 @@ fn apply_attachment_access(cipher: &mut Cipher, access: &CipherAccessView) {
     cipher.collection_ids = Some(access.collection_ids.clone());
     cipher.edit = access.can_edit();
     cipher.view_password = access.can_view_password();
+}
+
+pub(crate) fn cipher_notification_context_from_access(
+    access: &CipherAccessView,
+) -> CipherNotificationContext {
+    CipherNotificationContext {
+        organization_id: access.organization_id.clone(),
+        collection_ids: if access.organization_id.is_some() {
+            Some(access.collection_ids.clone())
+        } else {
+            None
+        },
+    }
 }
 
 pub(crate) async fn touch_attachment_scope_updated_at(
@@ -392,14 +405,19 @@ pub async fn upload_attachment_v2_data(
     let now = pending.finalize_pending(&db).await?;
     touch_attachment_scope_updated_at(&db, &claims.sub, &access, &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher_id,
-        now,
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher_id,
+            now,
+            Some(claims.device),
+            cipher_notification_context_from_access(&access),
+        ),
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -468,14 +486,19 @@ pub async fn upload_attachment_legacy(
     touch_cipher_updated_at(&db, &cipher_id, &now).await?;
     touch_attachment_scope_updated_at(&db, &claims.sub, &access, &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub.clone(),
-        UpdateType::SyncCipherUpdate,
-        cipher_id.clone(),
-        now.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher_id.clone(),
+            now.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_access(&access),
+        ),
+    )
+    .await;
 
     // reload cipher to return fresh updated_at and attachments state
     let mut cipher_response: Cipher = cipher.into();
@@ -557,14 +580,19 @@ pub async fn delete_attachment(
     touch_cipher_updated_at(&db, &cipher_id, &now).await?;
     touch_attachment_scope_updated_at(&db, &claims.sub, &access, &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub.clone(),
-        UpdateType::SyncCipherUpdate,
-        cipher_id.clone(),
-        now.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher_id.clone(),
+            now.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_access(&access),
+        ),
+    )
+    .await;
 
     // Reload cipher to return fresh updated_at and attachments state
     let mut cipher_response: Cipher = fetch_cipher_by_id(&db, &cipher_id).await?.into();

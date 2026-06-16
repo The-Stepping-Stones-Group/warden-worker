@@ -24,7 +24,7 @@ use crate::models::cipher::{
 };
 use crate::models::organization::{is_org_admin_type, ORG_USER_STATUS_CONFIRMED};
 use crate::models::user::{PasswordOrOtpData, User};
-use crate::notifications::{self, UpdateType};
+use crate::notifications::{self, CipherNotificationContext, CipherUpdateNotification, UpdateType};
 use crate::BaseUrl;
 
 /// A wrapper for raw JSON strings that implements IntoResponse.
@@ -63,6 +63,48 @@ pub(crate) fn normalize_collection_ids(collection_ids: Vec<String>) -> Vec<Strin
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn cipher_notification_context_from_parts(
+    organization_id: Option<String>,
+    collection_ids: Option<Vec<String>>,
+) -> CipherNotificationContext {
+    CipherNotificationContext {
+        collection_ids: if organization_id.is_some() {
+            Some(collection_ids.unwrap_or_default())
+        } else {
+            None
+        },
+        organization_id,
+    }
+}
+
+fn cipher_notification_context_from_cipher(cipher: &Cipher) -> CipherNotificationContext {
+    cipher_notification_context_from_parts(
+        cipher.organization_id.clone(),
+        cipher.collection_ids.clone(),
+    )
+}
+
+fn cipher_notification_context_from_access(access: &CipherAccessView) -> CipherNotificationContext {
+    cipher_notification_context_from_parts(
+        access.organization_id.clone(),
+        Some(access.collection_ids.clone()),
+    )
+}
+
+fn merge_notification_collection_ids(
+    old_collection_ids: Vec<String>,
+    new_collection_ids: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let merged = old_collection_ids
+        .into_iter()
+        .chain(new_collection_ids.unwrap_or_default())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    Some(merged)
 }
 
 pub(crate) async fn validate_collections_for_org(
@@ -422,6 +464,15 @@ async fn touch_access_scopes(
     Ok(())
 }
 
+fn organization_ids_from_accesses(accesses: &[CipherAccessView]) -> Vec<String> {
+    accesses
+        .iter()
+        .filter_map(|access| access.organization_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn parse_cipher_share_payload(
     payload: Value,
 ) -> Result<(CipherRequestData, Vec<String>), AppError> {
@@ -560,14 +611,19 @@ pub async fn create_cipher(
     )
     .await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherCreate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherCreate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_cipher(&cipher),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -583,7 +639,7 @@ pub async fn update_cipher(
     let db = db::get_db(&env)?;
     let now = db::now_string();
 
-    ensure_cipher_write(&db, &id, &claims.sub).await?;
+    let access = ensure_cipher_write(&db, &id, &claims.sub).await?;
     let existing_cipher = fetch_cipher_by_id(&db, &id).await?;
     let organization_id = match (
         existing_cipher.organization_id.as_ref(),
@@ -721,14 +777,25 @@ pub async fn update_cipher(
     )
     .await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_parts(
+                cipher.organization_id.clone(),
+                merge_notification_collection_ids(
+                    access.collection_ids,
+                    cipher.collection_ids.clone(),
+                ),
+            ),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -741,7 +808,7 @@ pub async fn share_cipher(
     Json(payload): Json<Value>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
-    ensure_cipher_write(&db, &id, &claims.sub).await?;
+    let access = ensure_cipher_write(&db, &id, &claims.sub).await?;
     let existing_cipher = fetch_cipher_by_id(&db, &id).await?;
     let (payload, raw_collection_ids) = parse_cipher_share_payload(payload)?;
     let org_id = payload
@@ -830,14 +897,25 @@ pub async fn share_cipher(
     )
     .await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_parts(
+                cipher.organization_id.clone(),
+                merge_notification_collection_ids(
+                    access.collection_ids,
+                    cipher.collection_ids.clone(),
+                ),
+            ),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -851,9 +929,10 @@ pub async fn put_cipher_collections(
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
     let access = ensure_cipher_write(&db, &id, &claims.sub).await?;
-    let org_id = access.organization_id.ok_or_else(|| {
+    let org_id = access.organization_id.clone().ok_or_else(|| {
         AppError::BadRequest("Personal ciphers cannot be assigned to collections".to_string())
     })?;
+    let old_collection_ids = access.collection_ids.clone();
     let collection_ids = normalize_collection_ids(
         collection_ids_from_value(&payload)
             .ok_or_else(|| AppError::BadRequest("collectionIds is required".to_string()))?,
@@ -881,14 +960,25 @@ pub async fn put_cipher_collections(
     hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
     touch_cipher_scope_updated_at(&db, &claims.sub, Some(&org_id), &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_parts(
+                Some(org_id),
+                merge_notification_collection_ids(
+                    old_collection_ids,
+                    cipher.collection_ids.clone(),
+                ),
+            ),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -1023,16 +1113,22 @@ pub async fn soft_delete_cipher(
     .run()
     .await?;
 
+    let notification_context = cipher_notification_context_from_access(&access);
     touch_access_scopes(&db, &claims.sub, &[access], &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        id,
-        now,
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            id,
+            now,
+            Some(claims.device),
+            notification_context,
+        ),
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -1067,15 +1163,19 @@ pub async fn soft_delete_ciphers_bulk(
     .await
     .map_err(db::map_d1_json_error)?;
 
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, &claims.sub, &accesses, &now).await?;
 
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
-        claims.sub,
+        claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -1113,16 +1213,22 @@ pub async fn hard_delete_cipher(
         .run()
         .await?;
 
+    let notification_context = cipher_notification_context_from_access(&access);
     touch_access_scopes(&db, &claims.sub, &[access], &now).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncLoginDelete,
-        id,
-        now,
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncLoginDelete,
+            id,
+            now,
+            Some(claims.device),
+            notification_context,
+        ),
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -1171,15 +1277,19 @@ pub async fn hard_delete_ciphers_bulk(
     .await
     .map_err(db::map_d1_json_error)?;
 
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, &claims.sub, &accesses, &now).await?;
 
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
-        claims.sub,
+        claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -1214,14 +1324,19 @@ pub async fn restore_cipher(
 
     touch_access_scopes(&db, &claims.sub, &[access], &cipher.updated_at).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_cipher(&cipher),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -1257,15 +1372,19 @@ pub async fn restore_ciphers_bulk(
     .await
     .map_err(db::map_d1_json_error)?;
 
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, &claims.sub, &accesses, &now).await?;
 
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
         claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     let mut params = visible_cipher_params(&claims.sub);
     params.push(ids_json.into());
@@ -1311,14 +1430,19 @@ pub async fn archive_cipher(
 
     touch_access_scopes(&db, &claims.sub, &[access], &cipher.updated_at).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_cipher(&cipher),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -1357,14 +1481,19 @@ pub async fn unarchive_cipher(
 
     touch_access_scopes(&db, &claims.sub, &[access], &cipher.updated_at).await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherUpdate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherUpdate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_cipher(&cipher),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -1398,15 +1527,19 @@ pub async fn archive_ciphers_bulk(
     .await
     .map_err(db::map_d1_json_error)?;
 
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, &claims.sub, &accesses, &now).await?;
 
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
         claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     let mut params = visible_cipher_params(&claims.sub);
     params.push(ids_json.into());
@@ -1447,15 +1580,19 @@ pub async fn unarchive_ciphers_bulk(
     .await
     .map_err(db::map_d1_json_error)?;
 
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, &claims.sub, &accesses, &now).await?;
 
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
         claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     let mut params = visible_cipher_params(&claims.sub);
     params.push(ids_json.into());
@@ -1551,14 +1688,19 @@ pub async fn create_cipher_simple(
     )
     .await?;
 
-    notifications::publish_cipher_update(
+    notifications::publish_cipher_update_for_scope(
+        &db,
         (*env).clone(),
         claims.sub,
-        UpdateType::SyncCipherCreate,
-        cipher.id.clone(),
-        cipher.updated_at.clone(),
-        Some(claims.device),
-    );
+        CipherUpdateNotification::new(
+            UpdateType::SyncCipherCreate,
+            cipher.id.clone(),
+            cipher.updated_at.clone(),
+            Some(claims.device),
+            cipher_notification_context_from_cipher(&cipher),
+        ),
+    )
+    .await;
 
     Ok(Json(cipher))
 }
@@ -1615,14 +1757,18 @@ pub async fn move_cipher_selected(
     .map_err(db::map_d1_json_error)?;
 
     // Update user's revision date
+    let notification_org_ids = organization_ids_from_accesses(&accesses);
     touch_access_scopes(&db, user_id, &accesses, &now).await?;
-    notifications::publish_user_update(
+    notifications::publish_user_update_for_scopes(
+        &db,
         (*env).clone(),
-        claims.sub,
+        claims.sub.clone(),
+        notification_org_ids,
         UpdateType::SyncCiphers,
-        now,
+        now.clone(),
         Some(claims.device),
-    );
+    )
+    .await;
 
     Ok(Json(()))
 }
@@ -2055,6 +2201,81 @@ mod tests {
         assert_eq!(
             ids,
             vec!["collection-1".to_string(), "collection-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn organization_ids_from_accesses_dedupes_org_scope_ids() {
+        let accesses = vec![
+            CipherAccessView {
+                cipher_id: "personal".into(),
+                owner_user_id: Some("actor".into()),
+                organization_id: None,
+                collection_ids: Vec::new(),
+                read_only: false,
+                hide_passwords: false,
+                manage: true,
+                member_type: None,
+                access_all: false,
+            },
+            CipherAccessView {
+                cipher_id: "org-cipher-1".into(),
+                owner_user_id: Some("actor".into()),
+                organization_id: Some("org-b".into()),
+                collection_ids: Vec::new(),
+                read_only: false,
+                hide_passwords: false,
+                manage: true,
+                member_type: Some(0),
+                access_all: true,
+            },
+            CipherAccessView {
+                cipher_id: "org-cipher-2".into(),
+                owner_user_id: Some("actor".into()),
+                organization_id: Some("org-a".into()),
+                collection_ids: Vec::new(),
+                read_only: false,
+                hide_passwords: false,
+                manage: true,
+                member_type: Some(0),
+                access_all: true,
+            },
+            CipherAccessView {
+                cipher_id: "org-cipher-3".into(),
+                owner_user_id: Some("actor".into()),
+                organization_id: Some("org-b".into()),
+                collection_ids: Vec::new(),
+                read_only: false,
+                hide_passwords: false,
+                manage: true,
+                member_type: Some(0),
+                access_all: true,
+            },
+        ];
+
+        assert_eq!(
+            organization_ids_from_accesses(&accesses),
+            vec!["org-a".to_string(), "org-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_notification_collection_ids_dedupes_old_and_new_ids() {
+        assert_eq!(
+            merge_notification_collection_ids(
+                vec!["collection-b".to_string(), "collection-a".to_string()],
+                Some(vec!["collection-c".to_string(), "collection-a".to_string()]),
+            ),
+            Some(vec![
+                "collection-a".to_string(),
+                "collection-b".to_string(),
+                "collection-c".to_string(),
+            ])
+        );
+
+        assert_eq!(
+            merge_notification_collection_ids(vec!["collection-a".to_string()], None),
+            Some(vec!["collection-a".to_string()])
         );
     }
 }
