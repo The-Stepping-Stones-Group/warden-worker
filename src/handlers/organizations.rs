@@ -451,6 +451,18 @@ fn organization_user_json(member: &OrganizationUserView) -> Value {
     })
 }
 
+fn organization_user_mini_details_json(member: &OrganizationUserView) -> Value {
+    json!({
+        "object": "organizationUserUserDetails",
+        "id": member.id,
+        "userId": member.user_id,
+        "email": member.email,
+        "name": member.name,
+        "type": member.member_type,
+        "status": member.status
+    })
+}
+
 async fn touch_org_members_updated_at(db: &Db, org_id: &str, now: &str) -> Result<(), AppError> {
     d1_query!(
         db,
@@ -1604,6 +1616,23 @@ pub async fn list_org_users(
 }
 
 #[worker::send]
+pub async fn list_org_users_mini_details(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    ensure_org_admin(&db, &org_id, &claims.sub).await?;
+    let values = organization_user_views(&db, &org_id)
+        .await?
+        .into_iter()
+        .map(|member| organization_user_mini_details_json(&member))
+        .collect();
+
+    Ok(Json(list_response(values)))
+}
+
+#[worker::send]
 pub async fn invite_org_users(
     claims: Claims,
     State(env): State<Arc<Env>>,
@@ -2354,6 +2383,51 @@ mod tests {
             value["collections"][0]["id"],
             Value::String("collection-1".into())
         );
+    }
+
+    #[test]
+    fn organization_user_mini_details_json_exposes_web_vault_shape() {
+        let member = OrganizationUserView {
+            id: "member-1".into(),
+            user_id: "user-1".into(),
+            organization_id: "org-1".into(),
+            name: Some("Member One".into()),
+            email: "member@ssg-healthcare.com".into(),
+            access_all: false,
+            key: Some("encrypted-member-key".into()),
+            status: ORG_USER_STATUS_CONFIRMED,
+            member_type: ORG_USER_TYPE_CUSTOM,
+            external_id: None,
+            collections: vec![json!({
+                "id": "collection-1",
+                "readOnly": false,
+                "hidePasswords": false,
+                "manage": true
+            })],
+            created_at: "2026-06-16T00:00:00.000Z".into(),
+            updated_at: "2026-06-16T00:00:00.000Z".into(),
+        };
+
+        let value = organization_user_mini_details_json(&member);
+
+        assert_eq!(
+            value["object"],
+            Value::String("organizationUserUserDetails".into())
+        );
+        assert_eq!(value["id"], Value::String("member-1".into()));
+        assert_eq!(value["userId"], Value::String("user-1".into()));
+        assert_eq!(
+            value["email"],
+            Value::String("member@ssg-healthcare.com".into())
+        );
+        assert_eq!(value["name"], Value::String("Member One".into()));
+        assert_eq!(value["type"], Value::Number(ORG_USER_TYPE_CUSTOM.into()));
+        assert_eq!(
+            value["status"],
+            Value::Number(ORG_USER_STATUS_CONFIRMED.into())
+        );
+        assert!(value.get("collections").is_none());
+        assert!(value.get("accessAll").is_none());
     }
 
     #[test]

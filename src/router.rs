@@ -12,6 +12,7 @@ use crate::handlers::{
 
 const ORG_BILLING_SELF_HOST_METADATA_ROUTE: &str =
     "/api/organizations/{org_id}/billing/vnext/self-host/metadata";
+const ORG_GROUPS_DETAILS_ROUTE: &str = "/api/organizations/{org_id}/groups/details";
 
 pub fn api_router(env: Env) -> Router {
     let app_state = Arc::new(env);
@@ -109,7 +110,7 @@ pub fn api_router(env: Env) -> Router {
         )
         .route(
             "/api/organizations/{org_id}/users/mini-details",
-            get(organizations::list_org_users),
+            get(organizations::list_org_users_mini_details),
         )
         .route(
             "/api/organizations/{org_id}/users/{member_id}/accept",
@@ -152,6 +153,10 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/organizations/{org_id}/policies/{policy_type}/vnext",
             get(organizations::get_org_policy),
+        )
+        .route(
+            ORG_GROUPS_DETAILS_ROUTE,
+            get(organizations::list_org_groups),
         )
         .route(
             "/api/organizations/{org_id}/groups",
@@ -502,6 +507,14 @@ mod tests {
         assert_eq!(
             ORG_BILLING_SELF_HOST_METADATA_ROUTE,
             "/api/organizations/{org_id}/billing/vnext/self-host/metadata"
+        );
+    }
+
+    #[test]
+    fn org_groups_details_route_matches_web_vault_endpoint() {
+        assert_eq!(
+            ORG_GROUPS_DETAILS_ROUTE,
+            "/api/organizations/{org_id}/groups/details"
         );
     }
 }
