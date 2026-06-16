@@ -20,6 +20,8 @@ impl CollectionDetails {
             "organizationId": self.organization_id,
             "name": self.name,
             "externalId": self.external_id,
+            "assigned": true,
+            "unmanaged": false,
             "readOnly": self.read_only,
             "hidePasswords": self.hide_passwords,
             "manage": self.manage
@@ -77,6 +79,8 @@ mod tests {
                 "organizationId": "org-1",
                 "name": "Shared Logins",
                 "externalId": null,
+                "assigned": true,
+                "unmanaged": false,
                 "readOnly": true,
                 "hidePasswords": true,
                 "manage": false

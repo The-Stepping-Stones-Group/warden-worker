@@ -65,6 +65,14 @@ pub(crate) fn normalize_collection_ids(collection_ids: Vec<String>) -> Vec<Strin
         .collect()
 }
 
+fn require_cipher_type(payload: &CipherRequestData) -> Result<i32, AppError> {
+    payload.resolved_type().ok_or_else(|| {
+        AppError::BadRequest(
+            "Cipher type is required and must match exactly one cipher payload".to_string(),
+        )
+    })
+}
+
 fn cipher_notification_context_from_parts(
     organization_id: Option<String>,
     collection_ids: Option<Vec<String>>,
@@ -533,6 +541,7 @@ pub async fn create_cipher(
     let db = db::get_db(&env)?;
     let now = db::now_string();
     let cipher_data_req = payload.cipher;
+    let cipher_type = require_cipher_type(&cipher_data_req)?;
     let collection_ids = normalize_collection_ids(payload.collection_ids);
     validate_cipher_org_assignment(
         &db,
@@ -560,7 +569,7 @@ pub async fn create_cipher(
         id: Uuid::new_v4().to_string(),
         user_id: Some(claims.sub.clone()),
         organization_id: cipher_data_req.organization_id.clone(),
-        r#type: cipher_data_req.r#type,
+        r#type: cipher_type,
         data: data_value,
         favorite: cipher_data_req.favorite.unwrap_or(false),
         folder_id: cipher_data_req.folder_id.clone(),
@@ -694,6 +703,7 @@ pub async fn update_cipher(
         &existing_cipher.updated_at,
     )?;
 
+    let cipher_type = require_cipher_type(&payload)?;
     let cipher_data = CipherData::new(payload.name, payload.notes, payload.type_fields);
 
     let data_value = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
@@ -702,7 +712,7 @@ pub async fn update_cipher(
         id: id.clone(),
         user_id: Some(existing_cipher.user_id.clone()),
         organization_id,
-        r#type: payload.r#type,
+        r#type: cipher_type,
         data: data_value,
         favorite: payload.favorite.unwrap_or(false),
         folder_id: payload.folder_id.clone(),
@@ -843,6 +853,7 @@ pub async fn share_cipher(
     ensure_org_cipher_collection_manage_access(&db, &org_id, &claims.sub).await?;
 
     let now = db::now_string();
+    let cipher_type = require_cipher_type(&payload)?;
     let cipher_data = CipherData::new(payload.name, payload.notes, payload.type_fields);
     let data_value = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
     let data = serde_json::to_string(&data_value).map_err(|_| AppError::Internal)?;
@@ -851,7 +862,7 @@ pub async fn share_cipher(
         id: id.clone(),
         user_id: Some(existing_cipher.user_id),
         organization_id: Some(org_id.clone()),
-        r#type: payload.r#type,
+        r#type: cipher_type,
         data: data_value,
         favorite: payload.favorite.unwrap_or(false),
         folder_id: None,
@@ -1617,6 +1628,7 @@ pub async fn create_cipher_simple(
     let now = db::now_string();
     let collection_ids =
         normalize_collection_ids(payload.collection_ids.clone().unwrap_or_default());
+    let cipher_type = require_cipher_type(&payload)?;
     validate_cipher_org_assignment(
         &db,
         &claims.sub,
@@ -1638,7 +1650,7 @@ pub async fn create_cipher_simple(
         id: Uuid::new_v4().to_string(),
         user_id: Some(claims.sub.clone()),
         organization_id: payload.organization_id.clone(),
-        r#type: payload.r#type,
+        r#type: cipher_type,
         data: data_value,
         favorite: payload.favorite.unwrap_or(false),
         folder_id: payload.folder_id.clone(),

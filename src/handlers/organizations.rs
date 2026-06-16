@@ -1976,13 +1976,15 @@ mod tests {
             parsed,
             json!([{
                 "externalId": null,
+                "assigned": true,
                 "hidePasswords": false,
                 "id": "collection-1",
                 "manage": true,
                 "name": "Shared",
                 "object": "collectionDetails",
                 "organizationId": "org-1",
-                "readOnly": false
+                "readOnly": false,
+                "unmanaged": false
             }])
         );
     }

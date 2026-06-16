@@ -230,8 +230,19 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/ciphers", get(ciphers::list_ciphers))
         .route("/api/ciphers", post(ciphers::create_cipher_simple))
         .route("/api/ciphers/create", post(ciphers::create_cipher))
+        .route(
+            "/api/ciphers/admin",
+            post(ciphers::create_cipher).delete(ciphers::hard_delete_ciphers_bulk),
+        )
         .route("/api/ciphers/import", post(import::import_data))
         .route("/api/ciphers/{id}", get(ciphers::get_cipher))
+        .route(
+            "/api/ciphers/{id}/admin",
+            get(ciphers::get_cipher)
+                .put(ciphers::update_cipher)
+                .post(ciphers::update_cipher)
+                .delete(ciphers::hard_delete_cipher),
+        )
         .route(
             "/api/ciphers/{id}/details",
             get(ciphers::get_cipher_details),
@@ -246,6 +257,10 @@ pub fn api_router(env: Env) -> Router {
         )
         .route(
             "/api/ciphers/{id}/collections_v2",
+            post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
+        )
+        .route(
+            "/api/ciphers/{id}/collections-admin",
             post(ciphers::put_cipher_collections).put(ciphers::put_cipher_collections),
         )
         // Attachments
@@ -280,6 +295,10 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/ciphers/{id}", post(ciphers::update_cipher))
         // Cipher soft delete (PUT sets deleted_at timestamp)
         .route("/api/ciphers/{id}/delete", put(ciphers::soft_delete_cipher))
+        .route(
+            "/api/ciphers/{id}/delete-admin",
+            put(ciphers::soft_delete_cipher),
+        )
         // Cipher hard delete (DELETE/POST permanently removes cipher)
         .route("/api/ciphers/{id}", delete(ciphers::hard_delete_cipher))
         .route(
@@ -305,11 +324,23 @@ pub fn api_router(env: Env) -> Router {
             "/api/ciphers/delete",
             post(ciphers::hard_delete_ciphers_bulk),
         )
+        .route(
+            "/api/ciphers/delete-admin",
+            put(ciphers::soft_delete_ciphers_bulk).post(ciphers::hard_delete_ciphers_bulk),
+        )
         .route("/api/ciphers", delete(ciphers::hard_delete_ciphers_bulk))
         // Cipher restore (clears deleted_at)
         .route("/api/ciphers/{id}/restore", put(ciphers::restore_cipher))
+        .route(
+            "/api/ciphers/{id}/restore-admin",
+            put(ciphers::restore_cipher),
+        )
         // Cipher bulk restore
         .route("/api/ciphers/restore", put(ciphers::restore_ciphers_bulk))
+        .route(
+            "/api/ciphers/restore-admin",
+            put(ciphers::restore_ciphers_bulk),
+        )
         // Cipher archive (sets archived_at)
         .route("/api/ciphers/{id}/archive", put(ciphers::archive_cipher))
         .route(
