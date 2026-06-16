@@ -49,10 +49,11 @@ simple = { limit = 5, period = 60 }
 # Frontend files (bw_web_builds) are expected under ./public/web-vault before deployment
 [assets]
 directory = "./public/web-vault"
+binding = "ASSETS"
 not_found_handling = "404-page"
 html_handling = "auto-trailing-slash"
-# Only invoke Worker for API and Identity routes, serve static files directly for other routes
-run_worker_first = ["/api/*", "/identity/*", "/notifications/*"]
+# Invoke Worker before static assets so ORIGIN_SHARED_SECRET can protect the web vault too.
+run_worker_first = true
 
 [vars]
 # Base URL for the worker, used for generating up/down URLs for files.
