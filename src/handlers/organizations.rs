@@ -293,13 +293,22 @@ fn org_subscription_stub(org_id: &str) -> Value {
 fn organization_permissions_json(member_type: Option<i32>) -> Value {
     let can_manage_collections = member_type.map(is_org_admin_type).unwrap_or(false);
     json!({
+        "accessEventLogs": can_manage_collections,
+        "accessImportExport": can_manage_collections,
+        "accessReports": can_manage_collections,
         "createNewCollections": can_manage_collections,
         "editAnyCollection": can_manage_collections,
-        "deleteAnyCollection": can_manage_collections
+        "deleteAnyCollection": can_manage_collections,
+        "manageUsers": can_manage_collections,
+        "manageGroups": false,
+        "manageSso": false,
+        "managePolicies": can_manage_collections,
+        "manageResetPassword": false
     })
 }
 
 fn organization_details_json(details: &OrganizationDetailsView) -> Value {
+    let can_manage_collections = details.member_type.map(is_org_admin_type).unwrap_or(false);
     json!({
         "object": "organization",
         "id": details.id,
@@ -324,6 +333,20 @@ fn organization_details_json(details: &OrganizationDetailsView) -> Value {
         "publicKey": details.public_key,
         "organizationUserId": details.member_id,
         "permissions": organization_permissions_json(details.member_type),
+        "allowAdminAccessToAllCollectionItems": can_manage_collections,
+        "canAccessEventLogs": can_manage_collections,
+        "canAccessImportExport": can_manage_collections,
+        "canAccessReports": can_manage_collections,
+        "canCreateNewCollections": can_manage_collections,
+        "canDeleteAnyCollection": can_manage_collections,
+        "canEditAllCiphers": can_manage_collections,
+        "canEditAnyCollection": can_manage_collections,
+        "canEditUnassignedCiphers": can_manage_collections,
+        "canEditUnmanagedCollections": can_manage_collections,
+        "canManagePolicies": can_manage_collections,
+        "canManageUsers": can_manage_collections,
+        "limitCollectionCreation": !can_manage_collections,
+        "limitCollectionDeletion": !can_manage_collections,
         "creationDate": details.created_at,
         "revisionDate": details.updated_at
     })
@@ -1988,6 +2011,14 @@ mod tests {
         );
         assert_eq!(value["useGroups"], Value::Bool(false));
         assert_eq!(value["permissions"]["editAnyCollection"], Value::Bool(true));
+        assert_eq!(value["permissions"]["manageUsers"], Value::Bool(true));
+        assert_eq!(value["canCreateNewCollections"], Value::Bool(true));
+        assert_eq!(value["canEditAllCiphers"], Value::Bool(true));
+        assert_eq!(value["canEditAnyCollection"], Value::Bool(true));
+        assert_eq!(
+            value["allowAdminAccessToAllCollectionItems"],
+            Value::Bool(true)
+        );
     }
 
     #[test]

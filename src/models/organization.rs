@@ -49,10 +49,30 @@ impl ProfileOrganization {
             "useGroups": false,
             "useSso": false,
             "permissions": {
+                "accessEventLogs": can_manage_collections,
+                "accessImportExport": can_manage_collections,
+                "accessReports": can_manage_collections,
                 "createNewCollections": can_manage_collections,
                 "editAnyCollection": can_manage_collections,
-                "deleteAnyCollection": can_manage_collections
+                "deleteAnyCollection": can_manage_collections,
+                "manageUsers": can_manage_collections,
+                "manageGroups": false,
+                "manageSso": false,
+                "managePolicies": can_manage_collections,
+                "manageResetPassword": false
             },
+            "allowAdminAccessToAllCollectionItems": can_manage_collections,
+            "canAccessEventLogs": can_manage_collections,
+            "canAccessImportExport": can_manage_collections,
+            "canAccessReports": can_manage_collections,
+            "canCreateNewCollections": can_manage_collections,
+            "canDeleteAnyCollection": can_manage_collections,
+            "canEditAllCiphers": can_manage_collections,
+            "canEditAnyCollection": can_manage_collections,
+            "canEditUnassignedCiphers": can_manage_collections,
+            "canEditUnmanagedCollections": can_manage_collections,
+            "canManagePolicies": can_manage_collections,
+            "canManageUsers": can_manage_collections,
             "limitCollectionCreation": !can_manage_collections,
             "limitCollectionDeletion": !can_manage_collections
         })
@@ -115,10 +135,30 @@ mod tests {
                 "useGroups": false,
                 "useSso": false,
                 "permissions": {
+                    "accessEventLogs": true,
+                    "accessImportExport": true,
+                    "accessReports": true,
                     "createNewCollections": true,
                     "editAnyCollection": true,
-                    "deleteAnyCollection": true
+                    "deleteAnyCollection": true,
+                    "manageUsers": true,
+                    "manageGroups": false,
+                    "manageSso": false,
+                    "managePolicies": true,
+                    "manageResetPassword": false
                 },
+                "allowAdminAccessToAllCollectionItems": true,
+                "canAccessEventLogs": true,
+                "canAccessImportExport": true,
+                "canAccessReports": true,
+                "canCreateNewCollections": true,
+                "canDeleteAnyCollection": true,
+                "canEditAllCiphers": true,
+                "canEditAnyCollection": true,
+                "canEditUnassignedCiphers": true,
+                "canEditUnmanagedCollections": true,
+                "canManagePolicies": true,
+                "canManageUsers": true,
                 "limitCollectionCreation": false,
                 "limitCollectionDeletion": false
             })
