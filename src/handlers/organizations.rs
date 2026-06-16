@@ -60,23 +60,33 @@ pub(crate) fn profile_rows_to_json(rows: Vec<ProfileOrganizationRow>) -> Vec<Val
         .collect()
 }
 
+fn profile_membership_statuses() -> [i32; 3] {
+    [
+        ORG_USER_STATUS_INVITED,
+        ORG_USER_STATUS_ACCEPTED,
+        ORG_USER_STATUS_CONFIRMED,
+    ]
+}
+
 pub(crate) async fn profile_organizations_for_user(
     db: &Db,
     user_id: &str,
 ) -> Result<Vec<Value>, AppError> {
+    let statuses = profile_membership_statuses();
     let rows: Vec<ProfileOrganizationRow> = db
         .prepare(
             "SELECT o.id, uo.id AS organization_user_id, uo.user_id, o.name, uo.key, \
                     uo.status, uo.type, o.private_key, o.public_key \
              FROM users_organizations uo \
              JOIN organizations o ON o.id = uo.organization_id \
-             WHERE uo.user_id = ?1 AND uo.status IN (?2, ?3) \
+             WHERE uo.user_id = ?1 AND uo.status IN (?2, ?3, ?4) \
              ORDER BY o.name COLLATE NOCASE",
         )
         .bind(&[
             user_id.into(),
-            ORG_USER_STATUS_ACCEPTED.into(),
-            ORG_USER_STATUS_CONFIRMED.into(),
+            statuses[0].into(),
+            statuses[1].into(),
+            statuses[2].into(),
         ])?
         .all()
         .await
@@ -2181,10 +2191,22 @@ mod tests {
     use super::*;
     use crate::models::collection::CollectionDetails;
     use crate::models::organization::{
-        ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER,
-        ORG_USER_TYPE_USER,
+        ORG_USER_STATUS_ACCEPTED, ORG_USER_STATUS_CONFIRMED, ORG_USER_STATUS_INVITED,
+        ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER, ORG_USER_TYPE_USER,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn profile_membership_statuses_include_invited_memberships() {
+        assert_eq!(
+            profile_membership_statuses(),
+            [
+                ORG_USER_STATUS_INVITED,
+                ORG_USER_STATUS_ACCEPTED,
+                ORG_USER_STATUS_CONFIRMED
+            ]
+        );
+    }
 
     #[test]
     fn organization_profile_rows_map_to_profile_json_values() {
