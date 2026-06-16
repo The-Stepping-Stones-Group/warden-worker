@@ -569,6 +569,9 @@ fn parse_cipher_share_payload(
     if cipher.organization_id.is_none() {
         cipher.organization_id = top_organization_id.or(wrapper_organization_id);
     }
+    if cipher.organization_id.is_some() {
+        cipher.folder_id = None;
+    }
 
     let collection_ids = top_collection_ids
         .or(wrapper_collection_ids)
@@ -2555,6 +2558,26 @@ mod tests {
         assert_eq!(cipher.organization_id.as_deref(), Some("org-1"));
         assert_eq!(cipher.name, "encrypted-name");
         assert_eq!(cipher.resolved_type(), Some(1));
+        assert_eq!(collection_ids, vec!["collection-1"]);
+    }
+
+    #[test]
+    fn share_payload_clears_personal_folder_for_org_secure_note_transfer() {
+        let payload = serde_json::json!({
+            "id": "cipher-1",
+            "folderId": "personal-folder-1",
+            "organizationId": "org-1",
+            "name": "encrypted-name",
+            "notes": "encrypted-note",
+            "secureNote": {"type": 0},
+            "collectionIds": ["collection-1"]
+        });
+
+        let (cipher, collection_ids) = parse_cipher_share_payload(payload).unwrap();
+
+        assert_eq!(cipher.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(cipher.folder_id, None);
+        assert_eq!(cipher.resolved_type(), Some(2));
         assert_eq!(collection_ids, vec!["collection-1"]);
     }
 
