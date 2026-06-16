@@ -5,6 +5,10 @@ keep_vars = true
 workers_dev = false
 preview_urls = false
 
+[[routes]]
+pattern = "secrets.steppingstonesgroup.dev"
+custom_domain = true
+
 [placement]
 mode = "smart"
 
@@ -101,6 +105,21 @@ run_worker_first = ["/api/*", "/identity/*", "/notifications/*"]
 [triggers]
 crons = ["0 3 * * *"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
 [[d1_databases]]
 binding = "vault1"
 database_name = "vault1"
@@ -110,16 +129,16 @@ migrations_dir = "migrations"
 # R2 bucket for file attachments (optional, requires credit card)
 # R2 has priority: if R2 is configured, KV is ignored.
 # R2 supports larger files and streaming uploads.
-# Uncomment and configure this section to enable file attachments via R2:
-# [[r2_buckets]]
-# binding = "ATTACHMENTS_BUCKET"
-# bucket_name = "warden-attachments"
+[[r2_buckets]]
+binding = "ATTACHMENTS_BUCKET"
+bucket_name = "warden-attachments"
 
 # KV namespace for file attachments (optional, no credit card required)
 # KV has a 25MB limit per file, but doesn't require credit card binding.
 # If R2 is not configured, KV will be used for attachments.
 [[kv_namespaces]]
 binding = "ATTACHMENTS_KV"
+id = "${ATTACHMENTS_KV_ID}"
 
 [env.dev]
 name = "warden-worker-dev"
