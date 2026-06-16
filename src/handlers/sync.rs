@@ -87,6 +87,7 @@ pub async fn get_sync_data(
 
     // Serialize profile and folders (small data, acceptable CPU cost)
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations = organizations::profile_organizations_for_user(&db, &user_id).await?;
     // Match vaultwarden semantics: `_status` is `Invited` when no master password is set.
     // We don't implement org invitations, but this helps clients interpret the account state.
     profile.status = if has_master_password { 0 } else { 1 };
