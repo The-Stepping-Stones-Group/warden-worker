@@ -1,4 +1,8 @@
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    Json,
+};
 use glob_match::glob_match;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -100,6 +104,15 @@ fn email_allowed_for_signup(allowed_emails: &str, email: &str) -> bool {
     allowed_emails
         .split(',')
         .any(|pattern| glob_match(&pattern.trim().to_ascii_lowercase(), &email))
+}
+
+fn user_public_key_json(user_id: &str, public_key: String) -> Value {
+    json!({
+        "object": "userKey",
+        "id": user_id,
+        "userId": user_id,
+        "publicKey": public_key
+    })
 }
 
 fn validate_rotation_metadata(
@@ -363,6 +376,8 @@ pub async fn register(
         })?;
     }
 
+    organizations::accept_pending_invites_for_user(&db, &user.id, &now).await?;
+
     Ok(Json(json!({})))
 }
 
@@ -461,6 +476,32 @@ pub async fn get_tasks() -> Result<Json<Value>, AppError> {
     })))
 }
 
+/// GET /api/users/:id/public-key - fetch a user's account public key for org confirmation.
+#[worker::send]
+pub async fn get_user_public_key(
+    _claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let row: Option<Value> = db
+        .prepare("SELECT public_key FROM users WHERE id = ?1")
+        .bind(&[user_id.as_str().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    let public_key = row
+        .and_then(|row| {
+            row.get("public_key")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    Ok(Json(user_public_key_json(&user_id, public_key)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +520,16 @@ mod tests {
             "*@ssg-healthcare.com",
             "Invitee@SSG-Healthcare.com"
         ));
+    }
+
+    #[test]
+    fn user_public_key_json_matches_web_vault_shape() {
+        let value = user_public_key_json("user-1", "b64-public-key".to_string());
+
+        assert_eq!(value["object"], Value::String("userKey".into()));
+        assert_eq!(value["id"], Value::String("user-1".into()));
+        assert_eq!(value["userId"], Value::String("user-1".into()));
+        assert_eq!(value["publicKey"], Value::String("b64-public-key".into()));
     }
 }
 

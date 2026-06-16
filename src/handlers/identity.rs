@@ -16,7 +16,7 @@ use crate::{
     db,
     error::AppError,
     handlers::{
-        allow_totp_drift, server_password_iterations,
+        allow_totp_drift, organizations, server_password_iterations,
         twofactor::{is_twofactor_enabled, list_user_twofactors},
     },
     models::{
@@ -643,6 +643,8 @@ pub async fn token(
             } else {
                 user
             };
+            organizations::accept_pending_invites_for_user(&db, &user.id, &db::now_string())
+                .await?;
             let mut two_factor_remember_token = None;
             if should_issue_remember {
                 let remember_token = generate_remember_token(env.as_ref(), &user, &device)?;

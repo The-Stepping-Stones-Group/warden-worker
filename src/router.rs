@@ -13,6 +13,7 @@ use crate::handlers::{
 const ORG_BILLING_SELF_HOST_METADATA_ROUTE: &str =
     "/api/organizations/{org_id}/billing/vnext/self-host/metadata";
 const ORG_GROUPS_DETAILS_ROUTE: &str = "/api/organizations/{org_id}/groups/details";
+const USER_PUBLIC_KEY_ROUTE: &str = "/api/users/{user_id}/public-key";
 
 pub fn api_router(env: Env) -> Router {
     let app_state = Arc::new(env);
@@ -44,6 +45,7 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/accounts/profile", post(accounts::post_profile))
         .route("/api/accounts/profile", put(accounts::put_profile))
         .route("/api/accounts/avatar", put(accounts::put_avatar))
+        .route(USER_PUBLIC_KEY_ROUTE, get(accounts::get_user_public_key))
         // Organizations and collections
         .route(
             "/api/organizations",
@@ -516,5 +518,10 @@ mod tests {
             ORG_GROUPS_DETAILS_ROUTE,
             "/api/organizations/{org_id}/groups/details"
         );
+    }
+
+    #[test]
+    fn user_public_key_route_matches_web_vault_endpoint() {
+        assert_eq!(USER_PUBLIC_KEY_ROUTE, "/api/users/{user_id}/public-key");
     }
 }

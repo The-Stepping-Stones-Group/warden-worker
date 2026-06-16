@@ -42,6 +42,11 @@ pub(crate) struct ProfileOrganizationRow {
     pub public_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PendingInviteOrgRow {
+    organization_id: String,
+}
+
 pub(crate) fn profile_rows_to_json(rows: Vec<ProfileOrganizationRow>) -> Vec<Value> {
     rows.into_iter()
         .map(|row| {
@@ -50,7 +55,7 @@ pub(crate) fn profile_rows_to_json(rows: Vec<ProfileOrganizationRow>) -> Vec<Val
                 organization_user_id: row.organization_user_id,
                 user_id: row.user_id,
                 name: row.name,
-                key: row.key.unwrap_or_default(),
+                key: row.key,
                 status: row.status,
                 r#type: row.member_type,
                 has_public_and_private_keys: row.private_key.is_some() && row.public_key.is_some(),
@@ -60,12 +65,52 @@ pub(crate) fn profile_rows_to_json(rows: Vec<ProfileOrganizationRow>) -> Vec<Val
         .collect()
 }
 
-fn profile_membership_statuses() -> [i32; 3] {
-    [
-        ORG_USER_STATUS_INVITED,
+fn profile_membership_statuses() -> [i32; 1] {
+    [ORG_USER_STATUS_CONFIRMED]
+}
+
+pub(crate) async fn accept_pending_invites_for_user(
+    db: &Db,
+    user_id: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    let rows: Vec<PendingInviteOrgRow> = db
+        .prepare(
+            "SELECT organization_id \
+             FROM users_organizations \
+             WHERE user_id = ?1 AND status = ?2",
+        )
+        .bind(&[user_id.into(), ORG_USER_STATUS_INVITED.into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()
+        .map_err(|_| AppError::Database)?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    d1_query!(
+        db,
+        "UPDATE users_organizations \
+         SET status = ?1, updated_at = ?2 \
+         WHERE user_id = ?3 AND status = ?4",
         ORG_USER_STATUS_ACCEPTED,
-        ORG_USER_STATUS_CONFIRMED,
-    ]
+        now,
+        user_id,
+        ORG_USER_STATUS_INVITED
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+
+    for row in rows {
+        touch_org_members_updated_at(db, &row.organization_id, now).await?;
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn profile_organizations_for_user(
@@ -79,15 +124,10 @@ pub(crate) async fn profile_organizations_for_user(
                     uo.status, uo.type, o.private_key, o.public_key \
              FROM users_organizations uo \
              JOIN organizations o ON o.id = uo.organization_id \
-             WHERE uo.user_id = ?1 AND uo.status IN (?2, ?3, ?4) \
+             WHERE uo.user_id = ?1 AND uo.status = ?2 \
              ORDER BY o.name COLLATE NOCASE",
         )
-        .bind(&[
-            user_id.into(),
-            statuses[0].into(),
-            statuses[1].into(),
-            statuses[2].into(),
-        ])?
+        .bind(&[user_id.into(), statuses[0].into()])?
         .all()
         .await
         .map_err(|_| AppError::Database)?
@@ -470,6 +510,19 @@ fn organization_user_mini_details_json(member: &OrganizationUserView) -> Value {
         "name": member.name,
         "type": member.member_type,
         "status": member.status
+    })
+}
+
+fn organization_user_public_key_json(
+    member: &OrganizationUserView,
+    public_key: Option<String>,
+) -> Value {
+    json!({
+        "object": "organizationUserPublicKey",
+        "id": member.id,
+        "userId": member.user_id,
+        "key": public_key.clone(),
+        "publicKey": public_key
     })
 }
 
@@ -2055,12 +2108,7 @@ pub async fn post_org_users_public_keys(
             .await
             .map_err(|_| AppError::Database)?;
 
-        values.push(json!({
-            "object": "organizationUserPublicKey",
-            "id": member.id,
-            "userId": member.user_id,
-            "publicKey": public_key
-        }));
+        values.push(organization_user_public_key_json(&member, public_key));
     }
 
     Ok(Json(list_response(values)))
@@ -2191,20 +2239,16 @@ mod tests {
     use super::*;
     use crate::models::collection::CollectionDetails;
     use crate::models::organization::{
-        ORG_USER_STATUS_ACCEPTED, ORG_USER_STATUS_CONFIRMED, ORG_USER_STATUS_INVITED,
-        ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER, ORG_USER_TYPE_USER,
+        ORG_USER_STATUS_CONFIRMED, ORG_USER_STATUS_INVITED, ORG_USER_TYPE_ADMIN,
+        ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER, ORG_USER_TYPE_USER,
     };
     use serde_json::{json, Value};
 
     #[test]
-    fn profile_membership_statuses_include_invited_memberships() {
+    fn profile_membership_statuses_only_include_confirmed_memberships() {
         assert_eq!(
-            profile_membership_statuses(),
-            [
-                ORG_USER_STATUS_INVITED,
-                ORG_USER_STATUS_ACCEPTED,
-                ORG_USER_STATUS_CONFIRMED
-            ]
+            profile_membership_statuses().as_slice(),
+            &[ORG_USER_STATUS_CONFIRMED]
         );
     }
 
@@ -2237,6 +2281,33 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(values[0]["useGroups"], Value::Bool(false));
+    }
+
+    #[test]
+    fn organization_profile_rows_preserve_missing_invite_key_as_null() {
+        let rows = vec![ProfileOrganizationRow {
+            id: "org-1".into(),
+            organization_user_id: "member-1".into(),
+            user_id: "user-1".into(),
+            name: "SSG".into(),
+            key: None,
+            status: ORG_USER_STATUS_INVITED,
+            member_type: ORG_USER_TYPE_USER,
+            private_key: Some("private".into()),
+            public_key: Some("public".into()),
+        }];
+
+        let values = profile_rows_to_json(rows);
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0]["status"],
+            Value::Number(ORG_USER_STATUS_INVITED.into())
+        );
+        assert_eq!(
+            values[0]["organizationUserId"],
+            Value::String("member-1".into())
+        );
+        assert_eq!(values[0]["key"], Value::Null);
     }
 
     #[test]
@@ -2450,6 +2521,36 @@ mod tests {
         );
         assert!(value.get("collections").is_none());
         assert!(value.get("accessAll").is_none());
+    }
+
+    #[test]
+    fn organization_user_public_key_json_exposes_key_aliases() {
+        let member = OrganizationUserView {
+            id: "member-1".into(),
+            user_id: "user-1".into(),
+            organization_id: "org-1".into(),
+            name: Some("Member One".into()),
+            email: "member@ssg-healthcare.com".into(),
+            access_all: false,
+            key: None,
+            status: ORG_USER_STATUS_ACCEPTED,
+            member_type: ORG_USER_TYPE_USER,
+            external_id: None,
+            collections: Vec::new(),
+            created_at: "2026-06-16T00:00:00.000Z".into(),
+            updated_at: "2026-06-16T00:00:00.000Z".into(),
+        };
+
+        let value = organization_user_public_key_json(&member, Some("b64-public-key".into()));
+
+        assert_eq!(
+            value["object"],
+            Value::String("organizationUserPublicKey".into())
+        );
+        assert_eq!(value["id"], Value::String("member-1".into()));
+        assert_eq!(value["userId"], Value::String("user-1".into()));
+        assert_eq!(value["key"], Value::String("b64-public-key".into()));
+        assert_eq!(value["publicKey"], Value::String("b64-public-key".into()));
     }
 
     #[test]
