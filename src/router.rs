@@ -231,6 +231,18 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/ciphers", post(ciphers::create_cipher_simple))
         .route("/api/ciphers/create", post(ciphers::create_cipher))
         .route(
+            "/api/ciphers/organization-details",
+            get(ciphers::list_organization_cipher_details),
+        )
+        .route(
+            "/api/ciphers/organization-details/assigned",
+            get(ciphers::list_organization_cipher_details),
+        )
+        .route(
+            "/api/ciphers/share",
+            post(ciphers::share_ciphers).put(ciphers::share_ciphers),
+        )
+        .route(
             "/api/ciphers/admin",
             post(ciphers::create_cipher).delete(ciphers::hard_delete_ciphers_bulk),
         )

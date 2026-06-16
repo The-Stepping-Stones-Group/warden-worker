@@ -1,12 +1,12 @@
 use crate::d1_query;
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, Extension, Json};
 use chrono::{DateTime, Utc};
 use log; // Used for warning logs on parse failures
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
 use uuid::Uuid;
 use worker::{wasm_bindgen::JsValue, Env};
@@ -437,6 +437,20 @@ fn collection_ids_from_value(value: &Value) -> Option<Vec<String>> {
     )
 }
 
+fn nested_cipher_value(value: &Value) -> &Value {
+    let mut candidate = value;
+    for _ in 0..4 {
+        let Some(next) = candidate.get("cipher").or_else(|| candidate.get("Cipher")) else {
+            break;
+        };
+        if !next.is_object() {
+            break;
+        }
+        candidate = next;
+    }
+    candidate
+}
+
 fn ids_from_body(body: &str) -> Result<Vec<String>, AppError> {
     let value = serde_json::from_str::<Value>(body)
         .map_err(|_| AppError::BadRequest("Malformed JSON in request body".to_string()))?;
@@ -485,27 +499,71 @@ fn parse_cipher_share_payload(
     payload: Value,
 ) -> Result<(CipherRequestData, Vec<String>), AppError> {
     let top_collection_ids = collection_ids_from_value(&payload);
-    let top_organization_id = string_field(&payload, &["organizationId", "organizationID"]);
+    let top_organization_id = string_field(
+        &payload,
+        &[
+            "organizationId",
+            "organizationID",
+            "OrganizationId",
+            "OrganizationID",
+        ],
+    );
+    let wrapper_value = payload.get("cipher").or_else(|| payload.get("Cipher"));
+    let wrapper_collection_ids = wrapper_value.and_then(collection_ids_from_value);
+    let wrapper_organization_id = wrapper_value.and_then(|value| {
+        string_field(
+            value,
+            &[
+                "organizationId",
+                "organizationID",
+                "OrganizationId",
+                "OrganizationID",
+            ],
+        )
+    });
+    let cipher_value = nested_cipher_value(&payload);
 
-    let mut cipher = if let Some(cipher_value) =
-        payload.get("cipher").or_else(|| payload.get("Cipher"))
-    {
-        serde_json::from_value::<CipherRequestData>(cipher_value.clone())
-            .map_err(|_| AppError::BadRequest("Invalid cipher payload for sharing".to_string()))?
-    } else {
-        serde_json::from_value::<CipherRequestData>(payload)
-            .map_err(|_| AppError::BadRequest("Invalid cipher payload for sharing".to_string()))?
-    };
+    let mut cipher = serde_json::from_value::<CipherRequestData>(cipher_value.clone())
+        .map_err(|_| AppError::BadRequest("Invalid cipher payload for sharing".to_string()))?;
 
     if cipher.organization_id.is_none() {
-        cipher.organization_id = top_organization_id;
+        cipher.organization_id = top_organization_id.or(wrapper_organization_id);
     }
 
     let collection_ids = top_collection_ids
+        .or(wrapper_collection_ids)
         .or_else(|| cipher.collection_ids.clone())
         .unwrap_or_default();
 
     Ok((cipher, collection_ids))
+}
+
+fn bulk_cipher_share_payloads(payload: Value) -> Result<Vec<(String, Value)>, AppError> {
+    let collection_ids = collection_ids_from_value(&payload).unwrap_or_default();
+    let ciphers = payload
+        .get("ciphers")
+        .or_else(|| payload.get("Ciphers"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::BadRequest("ciphers is required".to_string()))?;
+
+    if ciphers.is_empty() {
+        return Err(AppError::BadRequest("ciphers is required".to_string()));
+    }
+
+    ciphers
+        .iter()
+        .map(|cipher| {
+            let id = string_field(cipher, &["id", "Id"])
+                .ok_or_else(|| AppError::BadRequest("Cipher id is required".to_string()))?;
+            let mut payload = cipher.clone();
+            if let Value::Object(map) = &mut payload {
+                map.entry("collectionIds".to_string()).or_insert_with(|| {
+                    Value::Array(collection_ids.iter().cloned().map(Value::String).collect())
+                });
+            }
+            Ok((id, payload))
+        })
+        .collect()
 }
 
 async fn validate_folder_for_user(
@@ -818,8 +876,19 @@ pub async fn share_cipher(
     Json(payload): Json<Value>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
-    let access = ensure_cipher_write(&db, &id, &claims.sub).await?;
-    let existing_cipher = fetch_cipher_by_id(&db, &id).await?;
+    let cipher = share_cipher_payload(&db, env.as_ref(), &claims, id, payload).await?;
+    Ok(Json(cipher))
+}
+
+async fn share_cipher_payload(
+    db: &crate::db::Db,
+    env: &Env,
+    claims: &Claims,
+    id: String,
+    payload: Value,
+) -> Result<Cipher, AppError> {
+    let access = ensure_cipher_write(db, &id, &claims.sub).await?;
+    let existing_cipher = fetch_cipher_by_id(db, &id).await?;
     let (payload, raw_collection_ids) = parse_cipher_share_payload(payload)?;
     let org_id = payload
         .organization_id
@@ -849,8 +918,8 @@ pub async fn share_cipher(
     )?;
 
     let collection_ids = normalize_collection_ids(raw_collection_ids);
-    validate_cipher_org_assignment(&db, &claims.sub, Some(&org_id), &collection_ids).await?;
-    ensure_org_cipher_collection_manage_access(&db, &org_id, &claims.sub).await?;
+    validate_cipher_org_assignment(db, &claims.sub, Some(&org_id), &collection_ids).await?;
+    ensure_org_cipher_collection_manage_access(db, &org_id, &claims.sub).await?;
 
     let now = db::now_string();
     let cipher_type = require_cipher_type(&payload)?;
@@ -883,7 +952,7 @@ pub async fn share_cipher(
     };
 
     d1_query!(
-        &db,
+        db,
         "UPDATE ciphers SET organization_id = ?1, type = ?2, data = ?3, favorite = ?4, \
          folder_id = NULL, updated_at = ?5 WHERE id = ?6",
         org_id,
@@ -897,11 +966,11 @@ pub async fn share_cipher(
     .run()
     .await?;
 
-    replace_cipher_collections(&db, &cipher.id, &collection_ids, &now).await?;
-    attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
-    hydrate_cipher_access_fields(&db, &mut cipher, &claims.sub).await?;
+    replace_cipher_collections(db, &cipher.id, &collection_ids, &now).await?;
+    attachments::hydrate_cipher_attachments(db, env, &mut cipher).await?;
+    hydrate_cipher_access_fields(db, &mut cipher, &claims.sub).await?;
     touch_cipher_scope_updated_at(
-        &db,
+        db,
         &claims.sub,
         cipher.organization_id.as_deref(),
         &cipher.updated_at,
@@ -909,14 +978,14 @@ pub async fn share_cipher(
     .await?;
 
     notifications::publish_cipher_update_for_scope(
-        &db,
-        (*env).clone(),
-        claims.sub,
+        db,
+        env.clone(),
+        claims.sub.clone(),
         CipherUpdateNotification::new(
             UpdateType::SyncCipherUpdate,
             cipher.id.clone(),
             cipher.updated_at.clone(),
-            Some(claims.device),
+            Some(claims.device.clone()),
             cipher_notification_context_from_parts(
                 cipher.organization_id.clone(),
                 merge_notification_collection_ids(
@@ -928,7 +997,28 @@ pub async fn share_cipher(
     )
     .await;
 
-    Ok(Json(cipher))
+    Ok(cipher)
+}
+
+#[worker::send]
+pub async fn share_ciphers(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let share_payloads = bulk_cipher_share_payloads(payload)?;
+    let mut ciphers = Vec::with_capacity(share_payloads.len());
+
+    for (id, payload) in share_payloads {
+        ciphers.push(share_cipher_payload(&db, env.as_ref(), &claims, id, payload).await?);
+    }
+
+    Ok(Json(json!({
+        "data": ciphers,
+        "object": "list",
+        "continuationToken": null
+    })))
 }
 
 #[worker::send]
@@ -1006,6 +1096,28 @@ pub async fn list_ciphers(
         "WHERE c.deleted_at IS NULL AND ({})",
         visible_cipher_where_clause()
     );
+    build_cipher_list_response(
+        &db,
+        env.as_ref(),
+        &where_clause,
+        &params,
+        "ORDER BY c.updated_at DESC",
+        true,
+    )
+    .await
+}
+
+/// GET /api/ciphers/organization-details?organizationId=...
+#[worker::send]
+pub async fn list_organization_cipher_details(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Query(query): Query<OrganizationCipherDetailsQuery>,
+) -> Result<RawJson, AppError> {
+    let db = db::get_db(&env)?;
+    let mut params = visible_cipher_params(&claims.sub);
+    params.push(query.organization_id.into());
+    let where_clause = organization_cipher_details_where_clause();
     build_cipher_list_response(
         &db,
         env.as_ref(),
@@ -1863,6 +1975,17 @@ struct CipherJsonArrayRow {
     ciphers_json: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct OrganizationCipherDetailsQuery {
+    #[serde(
+        rename = "organizationId",
+        alias = "organizationID",
+        alias = "OrganizationId",
+        alias = "OrganizationID"
+    )]
+    organization_id: String,
+}
+
 /// Build the SQL expression for a single cipher as JSON.
 fn cipher_json_expr(attachments_enabled: bool, include_access_fields: bool) -> String {
     let attachments_expr = if attachments_enabled {
@@ -2018,6 +2141,13 @@ fn cipher_json_rows_sql(
         cipher_expr = cipher_expr,
         where_clause = where_clause,
         order_clause = order_clause,
+    )
+}
+
+fn organization_cipher_details_where_clause() -> String {
+    format!(
+        "WHERE c.deleted_at IS NULL AND c.organization_id = ?5 AND ({})",
+        visible_cipher_where_clause()
     )
 }
 
@@ -2202,6 +2332,16 @@ mod tests {
     }
 
     #[test]
+    fn organization_cipher_details_where_clause_filters_requested_org() {
+        let clause = organization_cipher_details_where_clause();
+
+        assert!(clause.contains("c.organization_id = ?5"));
+        assert!(clause.contains("c.deleted_at IS NULL"));
+        assert!(clause.contains("users_organizations"));
+        assert!(clause.contains("ciphers_collections"));
+    }
+
+    #[test]
     fn normalize_collection_ids_removes_duplicates_and_empty_values() {
         let ids = normalize_collection_ids(vec![
             "collection-2".into(),
@@ -2214,6 +2354,53 @@ mod tests {
             ids,
             vec!["collection-1".to_string(), "collection-2".to_string()]
         );
+    }
+
+    #[test]
+    fn share_payload_accepts_nested_sdk_cipher_wrapper() {
+        let payload = serde_json::json!({
+            "organizationId": "org-1",
+            "collectionIds": ["collection-1"],
+            "cipher": {
+                "cipher": {
+                    "name": "encrypted-name",
+                    "login": {"username": "encrypted-user"}
+                },
+                "encryptedFor": "organization"
+            }
+        });
+
+        let (cipher, collection_ids) = parse_cipher_share_payload(payload).unwrap();
+
+        assert_eq!(cipher.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(cipher.name, "encrypted-name");
+        assert_eq!(cipher.resolved_type(), Some(1));
+        assert_eq!(collection_ids, vec!["collection-1"]);
+    }
+
+    #[test]
+    fn bulk_share_payload_expands_top_level_collections_per_cipher() {
+        let payload = serde_json::json!({
+            "encryptedFor": "org-key-id",
+            "collectionIds": ["collection-1"],
+            "ciphers": [{
+                "id": "cipher-1",
+                "organizationId": "org-1",
+                "name": "encrypted-name",
+                "login": {"username": "encrypted-user"}
+            }]
+        });
+
+        let share_payloads = bulk_cipher_share_payloads(payload).unwrap();
+
+        assert_eq!(share_payloads.len(), 1);
+        assert_eq!(share_payloads[0].0, "cipher-1");
+        let (cipher, collection_ids) =
+            parse_cipher_share_payload(share_payloads[0].1.clone()).unwrap();
+        assert_eq!(cipher.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(cipher.name, "encrypted-name");
+        assert_eq!(cipher.resolved_type(), Some(1));
+        assert_eq!(collection_ids, vec!["collection-1"]);
     }
 
     #[test]
