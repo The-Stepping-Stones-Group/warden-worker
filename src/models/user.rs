@@ -1,9 +1,12 @@
 use constant_time_eq::constant_time_eq;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::d1_query;
 use crate::{crypto::verify_password, error::AppError};
+
+const DEFAULT_INVITED_USER_KDF_ITERATIONS: i32 = 600_000;
 
 fn default_json_array_string() -> String {
     "[]".to_string()
@@ -61,6 +64,37 @@ impl PasswordVerification {
 }
 
 impl User {
+    pub fn invited_placeholder(email: &str, now: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: None,
+            avatar_color: None,
+            email: email.trim().to_ascii_lowercase(),
+            email_verified: false,
+            master_password_hash: String::new(),
+            master_password_hint: None,
+            password_salt: None,
+            password_iterations: DEFAULT_INVITED_USER_KDF_ITERATIONS,
+            key: String::new(),
+            private_key: String::new(),
+            public_key: String::new(),
+            kdf_type: 0,
+            kdf_iterations: DEFAULT_INVITED_USER_KDF_ITERATIONS,
+            kdf_memory: None,
+            kdf_parallelism: None,
+            security_stamp: Uuid::new_v4().to_string(),
+            equivalent_domains: "[]".to_string(),
+            excluded_globals: "[]".to_string(),
+            totp_recover: None,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+        }
+    }
+
+    pub fn has_master_password(&self) -> bool {
+        !self.master_password_hash.is_empty()
+    }
+
     pub async fn find_by_email(db: &crate::db::Db, email: &str) -> Result<Option<Self>, AppError> {
         let row: Option<Value> = d1_query!(db, "SELECT * FROM users WHERE email = ?1", email)
             .map_err(|_| AppError::Database)?
@@ -301,4 +335,26 @@ pub struct ProfileData {
 #[serde(rename_all = "camelCase")]
 pub struct AvatarData {
     pub avatar_color: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invited_placeholder_user_has_no_master_password_and_safe_defaults() {
+        let user =
+            User::invited_placeholder("Invitee@SSG-Healthcare.com", "2026-06-16T00:00:00.000Z");
+
+        assert_eq!(user.email, "invitee@ssg-healthcare.com");
+        assert!(!user.has_master_password());
+        assert_eq!(user.master_password_hash, "");
+        assert_eq!(user.key, "");
+        assert_eq!(user.private_key, "");
+        assert_eq!(user.public_key, "");
+        assert_eq!(user.kdf_type, 0);
+        assert_eq!(user.kdf_iterations, 600_000);
+        assert_eq!(user.equivalent_domains, "[]");
+        assert_eq!(user.excluded_globals, "[]");
+    }
 }

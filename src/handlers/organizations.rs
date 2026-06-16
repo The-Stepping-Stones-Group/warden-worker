@@ -750,6 +750,60 @@ async fn organization_user_views(
     Ok(views)
 }
 
+async fn create_invited_placeholder_user(
+    db: &Db,
+    email: &str,
+    now: &str,
+) -> Result<User, AppError> {
+    let user = User::invited_placeholder(email, now);
+
+    d1_query!(
+        db,
+        "INSERT INTO users \
+            (id, name, email, email_verified, master_password_hash, master_password_hint, \
+             password_salt, password_iterations, key, private_key, public_key, kdf_type, \
+             kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, \
+             excluded_globals, totp_recover, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        user.id,
+        user.name,
+        user.email,
+        user.master_password_hash,
+        user.master_password_hint,
+        user.password_salt,
+        user.password_iterations,
+        user.key,
+        user.private_key,
+        user.public_key,
+        user.kdf_type,
+        user.kdf_iterations,
+        user.kdf_memory,
+        user.kdf_parallelism,
+        user.security_stamp,
+        user.equivalent_domains,
+        user.excluded_globals,
+        user.totp_recover,
+        user.created_at,
+        user.updated_at
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+
+    User::find_by_email(db, email)
+        .await?
+        .ok_or_else(|| AppError::Database)
+}
+
+async fn find_or_create_invited_user(db: &Db, email: &str, now: &str) -> Result<User, AppError> {
+    if let Some(user) = User::find_by_email(db, email).await? {
+        return Ok(user);
+    }
+
+    create_invited_placeholder_user(db, email, now).await
+}
+
 #[derive(Debug, Deserialize)]
 struct MemberCollectionRow {
     id: String,
@@ -1559,15 +1613,13 @@ pub async fn invite_org_users(
     let invited_member_type =
         resolve_requested_member_type(payload.member_type, ORG_USER_TYPE_USER, caller.member_type)?;
 
+    let now = db::now_string();
     let mut users = Vec::with_capacity(emails.len());
     for email in emails {
-        let user = User::find_by_email(&db, &email)
-            .await?
-            .ok_or_else(|| AppError::BadRequest("User must register before invite".to_string()))?;
+        let user = find_or_create_invited_user(&db, &email, &now).await?;
         users.push(user);
     }
 
-    let now = db::now_string();
     let mut values = Vec::with_capacity(users.len());
     for user in users {
         let existing = fetch_membership(&db, &org_id, &user.id).await?;

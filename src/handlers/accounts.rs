@@ -91,6 +91,17 @@ fn ensure_supported_kdf(
     Ok(())
 }
 
+fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn email_allowed_for_signup(allowed_emails: &str, email: &str) -> bool {
+    let email = normalize_email(email);
+    allowed_emails
+        .split(',')
+        .any(|pattern| glob_match(&pattern.trim().to_ascii_lowercase(), &email))
+}
+
 fn validate_rotation_metadata(
     user: &User,
     unlock_data: &MasterPasswordUnlockData,
@@ -215,10 +226,8 @@ pub async fn register(
         .as_ref()
         .as_string()
         .ok_or_else(|| AppError::Internal)?;
-    if !allowed_emails
-        .split(',')
-        .any(|pattern| glob_match(pattern.trim(), &payload.email))
-    {
+    let normalized_email = normalize_email(&payload.email);
+    if !email_allowed_for_signup(&allowed_emails, &normalized_email) {
         return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
     }
 
@@ -241,6 +250,7 @@ pub async fn register(
 
     let db = db::get_db(&env)?;
     let now = db::now_string();
+    let existing_user = User::find_by_email(&db, &normalized_email).await?;
 
     // Only store kdf_memory and kdf_parallelism for Argon2id, clear for PBKDF2
     let (kdf_memory, kdf_parallelism) = if payload.kdf == KDF_TYPE_ARGON2ID {
@@ -250,10 +260,13 @@ pub async fn register(
     };
 
     let user = User {
-        id: Uuid::new_v4().to_string(),
+        id: existing_user
+            .as_ref()
+            .map(|user| user.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: payload.name,
         avatar_color: None,
-        email: payload.email.to_lowercase(),
+        email: normalized_email,
         email_verified: false,
         master_password_hash: hashed_password,
         master_password_hint: payload.master_password_hint,
@@ -270,42 +283,85 @@ pub async fn register(
         equivalent_domains: "[]".to_string(),
         excluded_globals: "[]".to_string(),
         totp_recover: None,
-        created_at: now.clone(),
-        updated_at: now,
+        created_at: existing_user
+            .as_ref()
+            .map(|user| user.created_at.clone())
+            .unwrap_or_else(|| now.clone()),
+        updated_at: now.clone(),
     };
 
-    d1_query!(
-        &db,
-        "INSERT INTO users (id, name, email, master_password_hash, master_password_hint, password_salt, password_iterations, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-         user.id,
-         user.name,
-         user.email,
-         user.master_password_hash,
-         user.master_password_hint,
-         user.password_salt,
-         user.password_iterations,
-         user.key,
-         user.private_key,
-         user.public_key,
-         user.kdf_type,
-         user.kdf_iterations,
-         user.kdf_memory,
-         user.kdf_parallelism,
-         user.security_stamp,
-         user.equivalent_domains,
-         user.excluded_globals,
-         user.totp_recover,
-         user.created_at,
-         user.updated_at
-    ).map_err(|_|{
-        AppError::Database
-    })?
-    .run()
-    .await
-    .map_err(|_|{
-        AppError::Database
-    })?;
+    if let Some(existing_user) = existing_user {
+        if existing_user.has_master_password() {
+            return Err(AppError::Conflict("User already exists".to_string()));
+        }
+
+        d1_query!(
+            &db,
+            "UPDATE users \
+             SET name = ?1, email_verified = 0, master_password_hash = ?2, \
+                 master_password_hint = ?3, password_salt = ?4, password_iterations = ?5, \
+                 key = ?6, private_key = ?7, public_key = ?8, kdf_type = ?9, \
+                 kdf_iterations = ?10, kdf_memory = ?11, kdf_parallelism = ?12, \
+                 security_stamp = ?13, equivalent_domains = ?14, excluded_globals = ?15, \
+                 totp_recover = ?16, updated_at = ?17 \
+             WHERE id = ?18",
+            user.name,
+            user.master_password_hash,
+            user.master_password_hint,
+            user.password_salt,
+            user.password_iterations,
+            user.key,
+            user.private_key,
+            user.public_key,
+            user.kdf_type,
+            user.kdf_iterations,
+            user.kdf_memory,
+            user.kdf_parallelism,
+            user.security_stamp,
+            user.equivalent_domains,
+            user.excluded_globals,
+            user.totp_recover,
+            user.updated_at,
+            user.id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    } else {
+        d1_query!(
+            &db,
+            "INSERT INTO users (id, name, email, master_password_hash, master_password_hint, password_salt, password_iterations, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             user.id,
+             user.name,
+             user.email,
+             user.master_password_hash,
+             user.master_password_hint,
+             user.password_salt,
+             user.password_iterations,
+             user.key,
+             user.private_key,
+             user.public_key,
+             user.kdf_type,
+             user.kdf_iterations,
+             user.kdf_memory,
+             user.kdf_parallelism,
+             user.security_stamp,
+             user.equivalent_domains,
+             user.excluded_globals,
+             user.totp_recover,
+             user.created_at,
+             user.updated_at
+        ).map_err(|_|{
+            AppError::Database
+        })?
+        .run()
+        .await
+        .map_err(|_|{
+            AppError::Database
+        })?;
+    }
 
     Ok(Json(json!({})))
 }
@@ -415,6 +471,14 @@ mod tests {
 
         assert!(!message.contains("my memorable hint"));
         assert!(!message.contains("Your password hint is"));
+    }
+
+    #[test]
+    fn signup_allowlist_matches_case_insensitive_domain_patterns() {
+        assert!(email_allowed_for_signup(
+            "*@ssg-healthcare.com",
+            "Invitee@SSG-Healthcare.com"
+        ));
     }
 }
 
