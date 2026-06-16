@@ -115,6 +115,33 @@ fn merge_notification_collection_ids(
     Some(merged)
 }
 
+fn apply_bulk_collection_change(
+    current_collection_ids: Vec<String>,
+    requested_collection_ids: &[String],
+    remove_collections: bool,
+) -> Vec<String> {
+    let requested = requested_collection_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    if remove_collections {
+        current_collection_ids
+            .into_iter()
+            .filter(|id| !requested.contains(id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        current_collection_ids
+            .into_iter()
+            .chain(requested)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
 pub(crate) async fn validate_collections_for_org(
     db: &crate::db::Db,
     org_id: &str,
@@ -143,6 +170,19 @@ struct OrgCipherAccessRow {
     access_all: i32,
     #[serde(rename = "type")]
     member_type: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BulkCipherCollectionsRequest {
+    #[serde(alias = "OrganizationId")]
+    organization_id: String,
+    #[serde(alias = "CipherIds", alias = "ids", alias = "Ids")]
+    cipher_ids: Vec<String>,
+    #[serde(default, alias = "CollectionIds")]
+    collection_ids: Vec<String>,
+    #[serde(default, alias = "RemoveCollections")]
+    remove_collections: bool,
 }
 
 async fn ensure_org_cipher_write_access(
@@ -1082,6 +1122,81 @@ pub async fn put_cipher_collections(
     .await;
 
     Ok(Json(cipher))
+}
+
+#[worker::send]
+pub async fn bulk_update_cipher_collections(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<BulkCipherCollectionsRequest>,
+) -> Result<Json<Value>, AppError> {
+    if payload.cipher_ids.is_empty() {
+        return Err(AppError::BadRequest("cipherIds is required".to_string()));
+    }
+
+    let db = db::get_db(&env)?;
+    let collection_ids = normalize_collection_ids(payload.collection_ids);
+    validate_collections_for_org(&db, &payload.organization_id, &collection_ids).await?;
+    ensure_org_cipher_collection_manage_access(&db, &payload.organization_id, &claims.sub).await?;
+    let now = db::now_string();
+
+    for cipher_id in &payload.cipher_ids {
+        let access = ensure_cipher_write(&db, cipher_id, &claims.sub).await?;
+        if access.organization_id.as_deref() != Some(payload.organization_id.as_str()) {
+            return Err(AppError::BadRequest(
+                "Cipher does not belong to the requested organization".to_string(),
+            ));
+        }
+
+        let old_collection_ids = access.collection_ids.clone();
+        let next_collection_ids = apply_bulk_collection_change(
+            old_collection_ids.clone(),
+            &collection_ids,
+            payload.remove_collections,
+        );
+
+        validate_cipher_org_assignment(
+            &db,
+            &claims.sub,
+            Some(&payload.organization_id),
+            &next_collection_ids,
+        )
+        .await?;
+        replace_cipher_collections(&db, cipher_id, &next_collection_ids, &now).await?;
+        d1_query!(
+            &db,
+            "UPDATE ciphers SET updated_at = ?1 WHERE id = ?2",
+            now,
+            cipher_id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await?;
+
+        notifications::publish_cipher_update_for_scope(
+            &db,
+            (*env).clone(),
+            claims.sub.clone(),
+            CipherUpdateNotification::new(
+                UpdateType::SyncCipherUpdate,
+                cipher_id.clone(),
+                now.clone(),
+                Some(claims.device.clone()),
+                cipher_notification_context_from_parts(
+                    Some(payload.organization_id.clone()),
+                    merge_notification_collection_ids(
+                        old_collection_ids,
+                        Some(next_collection_ids),
+                    ),
+                ),
+            ),
+        )
+        .await;
+    }
+
+    touch_cipher_scope_updated_at(&db, &claims.sub, Some(&payload.organization_id), &now).await?;
+
+    Ok(Json(json!({})))
 }
 
 /// GET /api/ciphers - list all non-trashed ciphers for current user
@@ -2354,6 +2469,46 @@ mod tests {
             ids,
             vec!["collection-1".to_string(), "collection-2".to_string()]
         );
+    }
+
+    #[test]
+    fn apply_bulk_collection_change_adds_and_removes_requested_ids() {
+        let added = apply_bulk_collection_change(
+            vec!["collection-1".into(), "collection-2".into()],
+            &["collection-2".into(), "collection-3".into()],
+            false,
+        );
+        assert_eq!(
+            added,
+            vec![
+                "collection-1".to_string(),
+                "collection-2".to_string(),
+                "collection-3".to_string()
+            ]
+        );
+
+        let removed = apply_bulk_collection_change(
+            added,
+            &["collection-1".into(), "collection-3".into()],
+            true,
+        );
+        assert_eq!(removed, vec!["collection-2".to_string()]);
+    }
+
+    #[test]
+    fn bulk_cipher_collections_request_accepts_web_vault_payload() {
+        let payload: BulkCipherCollectionsRequest = serde_json::from_value(json!({
+            "organizationId": "org-1",
+            "cipherIds": ["cipher-1", "cipher-2"],
+            "collectionIds": ["collection-1"],
+            "removeCollections": true
+        }))
+        .unwrap();
+
+        assert_eq!(payload.organization_id, "org-1");
+        assert_eq!(payload.cipher_ids, vec!["cipher-1", "cipher-2"]);
+        assert_eq!(payload.collection_ids, vec!["collection-1"]);
+        assert!(payload.remove_collections);
     }
 
     #[test]

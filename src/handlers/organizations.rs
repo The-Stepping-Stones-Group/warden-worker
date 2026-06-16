@@ -120,6 +120,15 @@ pub(crate) fn collection_details_to_json_array(rows: Vec<CollectionDetails>) -> 
     serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
 }
 
+fn collection_access_details_json(collection: CollectionDetails, users: Vec<Value>) -> Value {
+    let mut value = collection.to_json();
+    if let Value::Object(map) = &mut value {
+        map.insert("users".to_string(), Value::Array(users));
+        map.insert("groups".to_string(), Value::Array(Vec::new()));
+    }
+    value
+}
+
 pub(crate) async fn visible_collections_for_user_json(
     db: &Db,
     user_id: &str,
@@ -623,6 +632,68 @@ async fn collection_rows_for_membership(
     Ok(rows.into_iter().map(CollectionDetails::from).collect())
 }
 
+async fn collection_for_membership(
+    db: &Db,
+    org_id: &str,
+    collection_id: &str,
+    membership: &OrganizationMembershipRow,
+) -> Result<CollectionDetails, AppError> {
+    collection_rows_for_membership(db, org_id, membership)
+        .await?
+        .into_iter()
+        .find(|collection| collection.id == collection_id)
+        .ok_or_else(|| AppError::NotFound("Collection not found".to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectionUserAccessRow {
+    id: String,
+    read_only: i32,
+    hide_passwords: i32,
+    manage: i32,
+}
+
+fn collection_user_access_json(row: CollectionUserAccessRow) -> Value {
+    json!({
+        "id": row.id,
+        "readOnly": row.read_only != 0,
+        "hidePasswords": row.hide_passwords != 0,
+        "manage": row.manage != 0
+    })
+}
+
+async fn collection_user_access_values(
+    db: &Db,
+    org_id: &str,
+    collection_id: &str,
+) -> Result<Vec<Value>, AppError> {
+    let rows: Vec<CollectionUserAccessRow> = db
+        .prepare(
+            "SELECT uo.id, uc.read_only, uc.hide_passwords, uc.manage \
+             FROM users_collections uc \
+             JOIN collections c ON c.id = uc.collection_id \
+             JOIN users_organizations uo \
+                ON uo.user_id = uc.user_id AND uo.organization_id = c.organization_id \
+             WHERE c.organization_id = ?1 \
+                AND c.id = ?2 \
+                AND uo.status IN (?3, ?4) \
+             ORDER BY uo.created_at",
+        )
+        .bind(&[
+            org_id.into(),
+            collection_id.into(),
+            ORG_USER_STATUS_ACCEPTED.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+        ])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()
+        .map_err(|_| AppError::Database)?;
+
+    Ok(rows.into_iter().map(collection_user_access_json).collect())
+}
+
 async fn organization_user_view_by_id(
     db: &Db,
     org_id: &str,
@@ -825,6 +896,16 @@ impl InviteOrgUsersRequest {
         }
         emails.into_iter().collect()
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BulkCollectionAccessRequest {
+    collection_ids: Vec<String>,
+    #[serde(default)]
+    users: Vec<CollectionUserRequest>,
+    #[serde(default)]
+    groups: Vec<CollectionUserRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1203,10 +1284,24 @@ pub async fn list_org_collections(
 #[worker::send]
 pub async fn list_org_collections_details(
     claims: Claims,
-    state: State<Arc<Env>>,
-    org_id: Path<String>,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    list_org_collections(claims, state, org_id).await
+    let db = db::get_db(&env)?;
+    let membership = ensure_org_member(&db, &org_id, &claims.sub).await?;
+    let collections = collection_rows_for_membership(&db, &org_id, &membership).await?;
+    let mut data = Vec::with_capacity(collections.len());
+
+    for collection in collections {
+        let users = if membership.is_admin() || collection.manage {
+            collection_user_access_values(&db, &org_id, &collection.id).await?
+        } else {
+            Vec::new()
+        };
+        data.push(collection_access_details_json(collection, users));
+    }
+
+    Ok(Json(list_response(data)))
 }
 
 #[worker::send]
@@ -1218,6 +1313,44 @@ pub async fn list_all_collections(
     let collections_json = visible_collections_for_user_json(&db, &claims.sub).await?;
     let data = serde_json::from_str::<Vec<Value>>(&collections_json).unwrap_or_default();
     Ok(Json(list_response(data)))
+}
+
+#[worker::send]
+pub async fn get_collection_details(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path((org_id, collection_id)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let membership = ensure_org_member(&db, &org_id, &claims.sub).await?;
+    let collection = collection_for_membership(&db, &org_id, &collection_id, &membership).await?;
+    let users = if membership.is_admin() || collection.manage {
+        collection_user_access_values(&db, &org_id, &collection_id).await?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(collection_access_details_json(collection, users)))
+}
+
+#[worker::send]
+pub async fn get_collection_users(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path((org_id, collection_id)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let membership = ensure_org_member(&db, &org_id, &claims.sub).await?;
+    let collection = collection_for_membership(&db, &org_id, &collection_id, &membership).await?;
+    if !membership.is_admin() && !collection.manage {
+        return Err(AppError::Forbidden(
+            "Collection manage permissions required".to_string(),
+        ));
+    }
+
+    Ok(Json(Value::Array(
+        collection_user_access_values(&db, &org_id, &collection_id).await?,
+    )))
 }
 
 #[worker::send]
@@ -1267,6 +1400,35 @@ pub async fn create_collection(
         }
         .to_json(),
     ))
+}
+
+#[worker::send]
+pub async fn update_collections_bulk_access(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+    Json(payload): Json<BulkCollectionAccessRequest>,
+) -> Result<Json<Value>, AppError> {
+    if !payload.groups.is_empty() {
+        return Err(AppError::BadRequest("Groups are not supported".to_string()));
+    }
+    if payload.collection_ids.is_empty() {
+        return Err(AppError::BadRequest(
+            "collectionIds is required".to_string(),
+        ));
+    }
+
+    let db = db::get_db(&env)?;
+    ensure_org_admin(&db, &org_id, &claims.sub).await?;
+    let now = db::now_string();
+
+    for collection_id in &payload.collection_ids {
+        collection_belongs_to_org(&db, &org_id, collection_id).await?;
+        replace_collection_users(&db, &org_id, collection_id, &payload.users, &now).await?;
+    }
+    touch_org_members_updated_at(&db, &org_id, &now).await?;
+
+    Ok(Json(json!({})))
 }
 
 #[worker::send]
@@ -1987,6 +2149,72 @@ mod tests {
                 "unmanaged": false
             }])
         );
+    }
+
+    #[test]
+    fn collection_access_details_json_includes_users_and_groups() {
+        let value = collection_access_details_json(
+            CollectionDetails {
+                id: "collection-1".into(),
+                organization_id: "org-1".into(),
+                name: "Shared".into(),
+                external_id: None,
+                read_only: false,
+                hide_passwords: false,
+                manage: true,
+            },
+            vec![json!({
+                "id": "member-1",
+                "readOnly": false,
+                "hidePasswords": true,
+                "manage": false
+            })],
+        );
+
+        assert_eq!(value["object"], Value::String("collectionDetails".into()));
+        assert_eq!(value["users"][0]["id"], Value::String("member-1".into()));
+        assert_eq!(value["users"][0]["hidePasswords"], Value::Bool(true));
+        assert_eq!(value["groups"], Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn collection_user_access_json_uses_member_id_and_acl_flags() {
+        let value = collection_user_access_json(CollectionUserAccessRow {
+            id: "member-1".into(),
+            read_only: 1,
+            hide_passwords: 0,
+            manage: 1,
+        });
+
+        assert_eq!(
+            value,
+            json!({
+                "id": "member-1",
+                "readOnly": true,
+                "hidePasswords": false,
+                "manage": true
+            })
+        );
+    }
+
+    #[test]
+    fn bulk_collection_access_request_accepts_web_vault_payload() {
+        let payload: BulkCollectionAccessRequest = serde_json::from_value(json!({
+            "collectionIds": ["collection-1", "collection-2"],
+            "users": [{
+                "id": "member-1",
+                "readOnly": false,
+                "hidePasswords": true,
+                "manage": false
+            }],
+            "groups": []
+        }))
+        .unwrap();
+
+        assert_eq!(payload.collection_ids, vec!["collection-1", "collection-2"]);
+        assert_eq!(payload.users[0].id, "member-1");
+        assert!(payload.users[0].hide_passwords);
+        assert!(payload.groups.is_empty());
     }
 
     #[test]

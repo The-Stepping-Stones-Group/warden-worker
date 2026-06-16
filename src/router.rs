@@ -74,11 +74,20 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/organizations/{org_id}/collections/bulk-access",
             get(organizations::list_org_compatibility_empty)
-                .post(organizations::unsupported_org_feature_mutation),
+                .post(organizations::update_collections_bulk_access),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}/details",
+            get(organizations::get_collection_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/{collection_id}/users",
+            get(organizations::get_collection_users),
         )
         .route(
             "/api/organizations/{org_id}/collections/{collection_id}",
-            put(organizations::update_collection)
+            get(organizations::get_collection_details)
+                .put(organizations::update_collection)
                 .post(organizations::update_collection)
                 .delete(organizations::delete_collection),
         )
@@ -241,6 +250,10 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/ciphers/share",
             post(ciphers::share_ciphers).put(ciphers::share_ciphers),
+        )
+        .route(
+            "/api/ciphers/bulk-collections",
+            post(ciphers::bulk_update_cipher_collections),
         )
         .route(
             "/api/ciphers/admin",
