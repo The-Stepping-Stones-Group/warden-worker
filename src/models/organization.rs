@@ -12,6 +12,7 @@ pub const ORG_USER_TYPE_ADMIN: i32 = 1;
 pub const ORG_USER_TYPE_USER: i32 = 2;
 #[allow(dead_code)]
 pub const ORG_USER_TYPE_MANAGER: i32 = 3;
+pub const ORG_USER_TYPE_CUSTOM: i32 = 4;
 
 pub fn is_org_admin_type(member_type: i32) -> bool {
     matches!(member_type, ORG_USER_TYPE_OWNER | ORG_USER_TYPE_ADMIN)

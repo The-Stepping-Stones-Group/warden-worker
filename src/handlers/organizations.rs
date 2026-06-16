@@ -21,8 +21,8 @@ use crate::{
         organization::{
             is_org_admin_type, CreateOrganizationRequest, OrganizationKeysRequest,
             ProfileOrganization, ORG_USER_STATUS_ACCEPTED, ORG_USER_STATUS_CONFIRMED,
-            ORG_USER_STATUS_INVITED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_MANAGER,
-            ORG_USER_TYPE_OWNER, ORG_USER_TYPE_USER,
+            ORG_USER_STATUS_INVITED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_CUSTOM,
+            ORG_USER_TYPE_MANAGER, ORG_USER_TYPE_OWNER, ORG_USER_TYPE_USER,
         },
         user::User,
     },
@@ -194,7 +194,11 @@ impl OrganizationMembershipRow {
 fn is_valid_org_member_type(member_type: i32) -> bool {
     matches!(
         member_type,
-        ORG_USER_TYPE_OWNER | ORG_USER_TYPE_ADMIN | ORG_USER_TYPE_USER | ORG_USER_TYPE_MANAGER
+        ORG_USER_TYPE_OWNER
+            | ORG_USER_TYPE_ADMIN
+            | ORG_USER_TYPE_USER
+            | ORG_USER_TYPE_MANAGER
+            | ORG_USER_TYPE_CUSTOM
     )
 }
 
@@ -931,6 +935,10 @@ pub(crate) struct InviteOrgUsersRequest {
     #[serde(rename = "type")]
     member_type: Option<i32>,
     access_all: Option<bool>,
+    #[serde(default)]
+    collections: Vec<MemberCollectionRequest>,
+    #[serde(default)]
+    groups: Vec<Value>,
 }
 
 impl InviteOrgUsersRequest {
@@ -1602,6 +1610,10 @@ pub async fn invite_org_users(
     Path(org_id): Path<String>,
     Json(payload): Json<InviteOrgUsersRequest>,
 ) -> Result<Json<Value>, AppError> {
+    if !payload.groups.is_empty() {
+        return Err(AppError::BadRequest("Groups are not supported".to_string()));
+    }
+
     let db = db::get_db(&env)?;
     let caller = ensure_org_admin(&db, &org_id, &claims.sub).await?;
     let emails = payload.normalized_emails();
@@ -1612,6 +1624,7 @@ pub async fn invite_org_users(
     }
     let invited_member_type =
         resolve_requested_member_type(payload.member_type, ORG_USER_TYPE_USER, caller.member_type)?;
+    validate_member_collections(&db, &org_id, &payload.collections).await?;
 
     let now = db::now_string();
     let mut users = Vec::with_capacity(emails.len());
@@ -1650,6 +1663,10 @@ pub async fn invite_org_users(
         .run()
         .await
         .map_err(|_| AppError::Database)?;
+
+        if !payload.collections.is_empty() {
+            replace_member_collections(&db, &org_id, &user.id, &payload.collections, &now).await?;
+        }
 
         values.push(organization_user_json(
             &organization_user_view_by_id(&db, &org_id, &member_id).await?,
@@ -2382,6 +2399,56 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn requested_custom_member_type_is_accepted() {
+        assert_eq!(
+            resolve_requested_member_type(Some(4), ORG_USER_TYPE_USER, ORG_USER_TYPE_OWNER)
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn invite_request_accepts_web_vault_custom_role_and_collections() {
+        let payload: InviteOrgUsersRequest = serde_json::from_value(json!({
+            "emails": ["member@ssg-healthcare.com"],
+            "type": 4,
+            "accessSecretsManager": false,
+            "collections": [{
+                "id": "collection-1",
+                "readOnly": false,
+                "hidePasswords": true,
+                "manage": false
+            }],
+            "groups": [],
+            "permissions": {
+                "accessEventLogs": false,
+                "accessImportExport": false,
+                "accessReports": false,
+                "manageAllCollections": false,
+                "createNewCollections": false,
+                "editAnyCollection": false,
+                "deleteAnyCollection": false,
+                "manageGroups": false,
+                "manageSso": false,
+                "managePolicies": false,
+                "manageUsers": false,
+                "manageResetPassword": false
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            payload.normalized_emails(),
+            vec!["member@ssg-healthcare.com"]
+        );
+        assert_eq!(payload.member_type, Some(4));
+        assert_eq!(payload.collections.len(), 1);
+        assert_eq!(payload.collections[0].id, "collection-1");
+        assert!(payload.collections[0].hide_passwords);
+        assert!(payload.groups.is_empty());
     }
 
     #[test]
