@@ -10,6 +10,9 @@ use crate::handlers::{
     folders, identity, import, meta, organizations, sends, sync, twofactor, webauth,
 };
 
+const ORG_BILLING_SELF_HOST_METADATA_ROUTE: &str =
+    "/api/organizations/{org_id}/billing/vnext/self-host/metadata";
+
 pub fn api_router(env: Env) -> Router {
     let app_state = Arc::new(env);
 
@@ -166,6 +169,10 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/organizations/{org_id}/billing/vnext/warnings",
             get(organizations::list_org_compatibility_empty),
+        )
+        .route(
+            ORG_BILLING_SELF_HOST_METADATA_ROUTE,
+            get(organizations::org_billing_metadata),
         )
         .route(
             "/api/organizations/{org_id}/billing/subscription",
@@ -484,4 +491,17 @@ pub fn api_router(env: Env) -> Router {
         )
         .route("/api/two-factor/get-recover", post(twofactor::get_recover))
         .with_state(app_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_host_billing_metadata_route_matches_web_vault_endpoint() {
+        assert_eq!(
+            ORG_BILLING_SELF_HOST_METADATA_ROUTE,
+            "/api/organizations/{org_id}/billing/vnext/self-host/metadata"
+        );
+    }
 }
