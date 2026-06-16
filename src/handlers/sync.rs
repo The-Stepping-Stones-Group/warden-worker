@@ -7,7 +7,7 @@ use crate::{
     db,
     error::AppError,
     handlers::{
-        attachments, ciphers, ciphers_default_row_query, domains, sends,
+        attachments, ciphers, ciphers_default_row_query, domains, organizations, sends,
         sync_response_prealloc_bytes, two_factor_enabled,
     },
     models::{
@@ -79,6 +79,7 @@ pub async fn get_sync_data(
         .results()?;
 
     let folders: Vec<FolderResponse> = folders_db.into_iter().map(|f| f.into()).collect();
+    let collections_json = organizations::visible_collections_for_user_json(&db, &user_id).await?;
 
     // Fetch ciphers as raw JSON array string (no parsing in Rust!)
     let include_attachments = attachments::attachments_enabled(env.as_ref());
@@ -123,13 +124,40 @@ pub async fn get_sync_data(
     response.push_str(&profile_json);
     response.push_str(",\"folders\":");
     response.push_str(&folders_json);
-    response.push_str(",\"collections\":[],\"policies\":[],\"ciphers\":");
+    response.push_str(",\"collections\":");
+    response.push_str(&collections_json);
+    response.push_str(",\"policies\":[],\"ciphers\":");
     ciphers::append_cipher_json_array_raw(
         &mut response,
         &db,
         include_attachments,
-        "WHERE c.user_id = ?1",
-        &[user_id.clone().into()],
+        "WHERE (c.organization_id IS NULL AND c.user_id = ?1)
+            OR (
+                c.organization_id IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM users_organizations uo
+                    WHERE uo.organization_id = c.organization_id
+                        AND uo.user_id = ?1
+                        AND uo.status = ?4
+                        AND (
+                            uo.access_all = 1
+                            OR uo.type IN (?2, ?3)
+                            OR EXISTS (
+                                SELECT 1
+                                FROM ciphers_collections cc
+                                JOIN users_collections uc ON uc.collection_id = cc.collection_id
+                                WHERE cc.cipher_id = c.id AND uc.user_id = ?1
+                            )
+                        )
+                )
+            )",
+        &[
+            user_id.clone().into(),
+            crate::models::organization::ORG_USER_TYPE_OWNER.into(),
+            crate::models::organization::ORG_USER_TYPE_ADMIN.into(),
+            crate::models::organization::ORG_USER_STATUS_CONFIRMED.into(),
+        ],
         "",
         force_row_query,
     )

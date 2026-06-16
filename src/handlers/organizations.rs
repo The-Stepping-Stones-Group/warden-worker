@@ -4,8 +4,12 @@ use serde_json::Value;
 use crate::{
     db::Db,
     error::AppError,
-    models::organization::{
-        is_org_admin_type, ProfileOrganization, ORG_USER_STATUS_ACCEPTED, ORG_USER_STATUS_CONFIRMED,
+    models::{
+        collection::CollectionDetails,
+        organization::{
+            is_org_admin_type, ProfileOrganization, ORG_USER_STATUS_ACCEPTED,
+            ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_OWNER,
+        },
     },
 };
 
@@ -68,6 +72,77 @@ pub(crate) async fn profile_organizations_for_user(
     Ok(profile_rows_to_json(rows))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct CollectionDetailsRow {
+    pub id: String,
+    pub organization_id: String,
+    pub name: String,
+    pub external_id: Option<String>,
+    pub read_only: i32,
+    pub hide_passwords: i32,
+    pub manage: i32,
+}
+
+impl From<CollectionDetailsRow> for CollectionDetails {
+    fn from(row: CollectionDetailsRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            name: row.name,
+            external_id: row.external_id,
+            read_only: row.read_only != 0,
+            hide_passwords: row.hide_passwords != 0,
+            manage: row.manage != 0,
+        }
+    }
+}
+
+pub(crate) fn collection_details_to_json_array(rows: Vec<CollectionDetails>) -> String {
+    let values: Vec<Value> = rows
+        .into_iter()
+        .map(|collection| collection.to_json())
+        .collect();
+    serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub(crate) async fn visible_collections_for_user_json(
+    db: &Db,
+    user_id: &str,
+) -> Result<String, AppError> {
+    let rows: Vec<CollectionDetailsRow> = db
+        .prepare(
+            "SELECT \
+                c.id, \
+                c.organization_id, \
+                c.name, \
+                c.external_id, \
+                CASE WHEN uo.access_all = 1 OR uo.type IN (?2, ?3) THEN 0 ELSE COALESCE(uc.read_only, 0) END AS read_only, \
+                CASE WHEN uo.access_all = 1 OR uo.type IN (?2, ?3) THEN 0 ELSE COALESCE(uc.hide_passwords, 0) END AS hide_passwords, \
+                CASE WHEN uo.access_all = 1 OR uo.type IN (?2, ?3) THEN 1 ELSE COALESCE(uc.manage, 0) END AS manage \
+             FROM collections c \
+             JOIN users_organizations uo ON uo.organization_id = c.organization_id \
+             LEFT JOIN users_collections uc ON uc.collection_id = c.id AND uc.user_id = ?1 \
+             WHERE uo.user_id = ?1 \
+                AND uo.status = ?4 \
+                AND (uo.access_all = 1 OR uo.type IN (?2, ?3) OR uc.user_id IS NOT NULL) \
+             ORDER BY c.name COLLATE NOCASE",
+        )
+        .bind(&[
+            user_id.into(),
+            ORG_USER_TYPE_OWNER.into(),
+            ORG_USER_TYPE_ADMIN.into(),
+            ORG_USER_STATUS_CONFIRMED.into(),
+        ])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()
+        .map_err(|_| AppError::Database)?;
+
+    let collections = rows.into_iter().map(CollectionDetails::from).collect();
+    Ok(collection_details_to_json_array(collections))
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct OrganizationMembershipRow {
@@ -95,8 +170,9 @@ impl OrganizationMembershipRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::collection::CollectionDetails;
     use crate::models::organization::{ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN};
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     #[test]
     fn organization_profile_rows_map_to_profile_json_values() {
@@ -127,5 +203,35 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(values[0]["useGroups"], Value::Bool(false));
+    }
+
+    #[test]
+    fn collections_json_array_serializes_collection_details() {
+        let rows = vec![CollectionDetails {
+            id: "collection-1".into(),
+            organization_id: "org-1".into(),
+            name: "Shared".into(),
+            external_id: None,
+            read_only: false,
+            hide_passwords: false,
+            manage: true,
+        }];
+
+        let json_array = collection_details_to_json_array(rows);
+        let parsed: Value = serde_json::from_str(&json_array).unwrap();
+
+        assert_eq!(
+            parsed,
+            json!([{
+                "externalId": null,
+                "hidePasswords": false,
+                "id": "collection-1",
+                "manage": true,
+                "name": "Shared",
+                "object": "collectionDetails",
+                "organizationId": "org-1",
+                "readOnly": false
+            }])
+        );
     }
 }

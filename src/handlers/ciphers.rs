@@ -1054,7 +1054,11 @@ fn cipher_json_expr(attachments_enabled: bool) -> String {
             'viewPassword', json('true'),
             'permissions', json_object('delete', json('true'), 'restore', json('true')),
             'organizationUseTotp', json('false'),
-            'collectionIds', json('[]'),
+            'collectionIds', COALESCE((
+                SELECT json_group_array(cc.collection_id)
+                FROM ciphers_collections cc
+                WHERE cc.cipher_id = c.id
+            ), json('[]')),
             'revisionDate', c.updated_at,
             'creationDate', c.created_at,
             'deletedDate', c.deleted_at,
@@ -1250,4 +1254,19 @@ pub(crate) async fn append_from_rows(
     }
     out.push(']');
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cipher_json_expression_uses_access_aliases_for_org_permissions() {
+        let sql = cipher_json_expr(false);
+
+        assert!(sql.contains("'collectionIds'"));
+        assert!(sql.contains("json_group_array"));
+        assert!(sql.contains("'edit'"));
+        assert!(sql.contains("'viewPassword'"));
+    }
 }

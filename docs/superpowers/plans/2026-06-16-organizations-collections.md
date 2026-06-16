@@ -719,7 +719,7 @@ git commit -m "feat: add shared cipher access helper"
 - Modify: `src/handlers/sync.rs`
 - Modify: `src/handlers/ciphers.rs`
 
-- [ ] **Step 1: Write failing JSON SQL tests**
+- [x] **Step 1: Write failing JSON SQL tests**
 
 Add pure tests in `src/handlers/ciphers.rs` for SQL expression content:
 
@@ -753,7 +753,7 @@ fn collections_json_array_serializes_collection_details() {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -763,11 +763,11 @@ cargo test --locked --lib
 
 Expected: fail because collection aggregation and SQL expression changes are absent.
 
-- [ ] **Step 3: Add visible collection JSON helper**
+- [x] **Step 3: Add visible collection JSON helper**
 
 In `organizations.rs`, add `visible_collections_for_user_json(db, user_id)` that queries confirmed memberships and collection ACL rows, then serializes `Vec<CollectionDetails>` into a JSON array string using `to_json()`.
 
-- [ ] **Step 4: Update sync assembly**
+- [x] **Step 4: Update sync assembly**
 
 In `sync.rs`, compute:
 
@@ -777,11 +777,11 @@ let collections_json = organizations::visible_collections_for_user_json(&db, &us
 
 Replace the hard-coded `,"collections":[]` with `,"collections":` followed by `collections_json`, keep `,"policies":[]`, and change cipher append to a new visible-cipher where clause that includes personal rows and org rows through confirmed membership/collection ACL.
 
-- [ ] **Step 5: Update cipher JSON expression**
+- [x] **Step 5: Update cipher JSON expression**
 
 Change `cipher_json_expr` so `collectionIds` is built from `ciphers_collections`, and `edit`, `viewPassword`, and `permissions` can be calculated when the query aliases access columns. The expression must still work for personal-only list routes.
 
-- [ ] **Step 6: Verify green**
+- [x] **Step 6: Verify green**
 
 Run:
 
@@ -793,7 +793,7 @@ cargo fmt -- --check
 
 Expected: all local tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/handlers/organizations.rs src/handlers/sync.rs src/handlers/ciphers.rs
