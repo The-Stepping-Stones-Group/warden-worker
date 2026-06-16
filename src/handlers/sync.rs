@@ -89,7 +89,7 @@ pub async fn get_sync_data(
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
     profile.organizations = organizations::profile_organizations_for_user(&db, &user_id).await?;
     // Match vaultwarden semantics: `_status` is `Invited` when no master password is set.
-    // We don't implement org invitations, but this helps clients interpret the account state.
+    // Organization invitations are exposed through `profile.organizations`.
     profile.status = if has_master_password { 0 } else { 1 };
     let profile_json = serde_json::to_string(&profile).map_err(|_| AppError::Internal)?;
     let folders_json = serde_json::to_string(&folders).map_err(|_| AppError::Internal)?;
