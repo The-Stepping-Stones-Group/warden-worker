@@ -985,7 +985,7 @@ git commit -m "feat: persist organization cipher sharing"
 - Modify: `src/handlers/accounts.rs`
 - Modify: `src/handlers/purge.rs`
 
-- [ ] **Step 1: Write failing access replacement tests**
+- [x] **Step 1: Write failing access replacement tests**
 
 Add a pure SQL test in `src/handlers/ciphers.rs`:
 
@@ -1000,7 +1000,7 @@ fn visible_cipher_where_clause_includes_personal_and_org_access() {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -1010,15 +1010,15 @@ cargo test --locked visible_cipher_where_clause_includes_personal_and_org_access
 
 Expected: fail because `visible_cipher_where_clause` does not exist.
 
-- [ ] **Step 3: Replace direct `c.user_id = ?` access paths**
+- [x] **Step 3: Replace direct `c.user_id = ?` access paths**
 
 Update all cipher read/write/delete/list/archive/restore/bulk/move paths to use `cipher_access` helpers or visible SQL. Preserve personal folder validation. Reject folder assignment for org ciphers because folders are personal.
 
-- [ ] **Step 4: Keep account rotation personal-only by design**
+- [x] **Step 4: Keep account rotation personal-only by design**
 
 Update key rotation validation comments and queries so it explicitly rotates only personal ciphers and leaves org ciphers to org sharing flows. Do not silently mutate org ciphers during personal key rotation.
 
-- [ ] **Step 5: Verify green**
+- [x] **Step 5: Verify green**
 
 Run:
 
@@ -1030,7 +1030,7 @@ cargo fmt -- --check
 
 Expected: all local tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/handlers/ciphers.rs src/handlers/accounts.rs src/handlers/purge.rs

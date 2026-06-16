@@ -612,7 +612,7 @@ pub(crate) async fn list_attachment_keys_for_user(
         .prepare(
             "SELECT a.cipher_id, a.id FROM attachments a \
              JOIN ciphers c ON a.cipher_id = c.id \
-             WHERE c.user_id = ?1",
+             WHERE c.user_id = ?1 AND c.organization_id IS NULL",
         )
         .bind(&[user_id.into()])?
         .all()

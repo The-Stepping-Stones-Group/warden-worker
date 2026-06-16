@@ -604,11 +604,34 @@ pub async fn delete_account(
     // Delete all user's sends and associated storage objects
     sends::delete_user_sends(&db, env.as_ref(), user_id).await?;
 
-    // Delete all user's ciphers
-    d1_query!(&db, "DELETE FROM ciphers WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+    // Delete only personal ciphers. Organization ciphers stay with the organization even
+    // when their original creator account is removed.
+    d1_query!(
+        &db,
+        "DELETE FROM ciphers WHERE user_id = ?1 AND organization_id IS NULL",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    d1_query!(
+        &db,
+        "DELETE FROM users_collections WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    d1_query!(
+        &db,
+        "DELETE FROM users_organizations WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
 
     // Delete all user's folders
     d1_query!(&db, "DELETE FROM folders WHERE user_id = ?1", user_id)
