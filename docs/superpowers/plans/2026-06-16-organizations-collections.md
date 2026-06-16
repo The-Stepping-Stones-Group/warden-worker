@@ -573,8 +573,9 @@ git commit -m "feat: add organization profile helpers"
 **Files:**
 - Create: `src/handlers/cipher_access.rs`
 - Modify: `src/handlers/mod.rs`
+- Modify: `src/error.rs`
 
-- [ ] **Step 1: Write failing permission tests**
+- [x] **Step 1: Write failing permission tests**
 
 Add tests in `src/handlers/cipher_access.rs`:
 
@@ -623,7 +624,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -633,7 +634,7 @@ cargo test --locked --lib
 
 Expected: fail because `CipherAccessView` does not exist.
 
-- [ ] **Step 3: Implement pure access type and query entry points**
+- [x] **Step 3: Implement pure access type and query entry points**
 
 Add `CipherAccessView`, permission methods, and async functions:
 
@@ -688,11 +689,12 @@ impl CipherAccessView {
 
 Add async query functions named `get_cipher_access_view`, `ensure_cipher_read`,
 `ensure_cipher_write`, and `ensure_cipher_delete`. They must return `404` for no
-visible row and `403` for visible but read-only mutation attempts. The SQL joins
+visible row and `403` for visible but read-only mutation attempts. Add
+`AppError::Forbidden(String)` and map it to HTTP 403. The SQL joins
 `ciphers`, `users_organizations`, `ciphers_collections`, and `users_collections`,
 and personal rows match `c.user_id = ?user_id AND c.organization_id IS NULL`.
 
-- [ ] **Step 4: Verify green**
+- [x] **Step 4: Verify green**
 
 Run:
 
@@ -703,7 +705,7 @@ cargo fmt -- --check
 
 Expected: access tests pass and formatting is clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/handlers/cipher_access.rs src/handlers/mod.rs

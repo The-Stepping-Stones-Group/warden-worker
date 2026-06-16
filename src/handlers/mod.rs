@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod attachments;
 pub mod auth_requests;
+pub mod cipher_access;
 pub mod ciphers;
 pub mod config;
 pub mod devices;
