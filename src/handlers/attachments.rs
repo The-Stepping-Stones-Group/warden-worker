@@ -12,7 +12,7 @@ use log;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use worker::{wasm_bindgen::JsValue, Env, HttpMetadata};
+use worker::{wasm_bindgen::JsValue, Env};
 
 use crate::d1_query;
 
@@ -372,8 +372,7 @@ pub async fn upload_attachment_v2_data(
         ));
     }
 
-    let (file_bytes, content_type, key_override, _file_name) =
-        read_multipart(&mut multipart).await?;
+    let (file_bytes, key_override, _file_name) = read_multipart(&mut multipart).await?;
     let actual_size = file_bytes.len() as i64;
 
     if actual_size != pending.file_size {
@@ -400,7 +399,7 @@ pub async fn upload_attachment_v2_data(
         pending.akey = Some(k);
     }
 
-    upload_to_storage(&env, &pending.r2_key(), content_type, file_bytes.to_vec()).await?;
+    upload_to_storage(&env, &pending.r2_key(), file_bytes.to_vec()).await?;
 
     let now = pending.finalize_pending(&db).await?;
     touch_attachment_scope_updated_at(&db, &claims.sub, &access, &now).await?;
@@ -440,7 +439,7 @@ pub async fn upload_attachment_legacy(
 
     let (cipher, access) = ensure_cipher_attachment_write(&db, &cipher_id, &claims.sub).await?;
 
-    let (file_bytes, content_type, key, file_name) = read_multipart(&mut multipart).await?;
+    let (file_bytes, key, file_name) = read_multipart(&mut multipart).await?;
     let key = key.ok_or_else(|| AppError::BadRequest("No attachment key provided".to_string()))?;
     let file_name =
         file_name.ok_or_else(|| AppError::BadRequest("No filename provided".to_string()))?;
@@ -478,7 +477,6 @@ pub async fn upload_attachment_legacy(
     upload_to_storage(
         &env,
         &format!("{}/{}", cipher_id, attachment_id),
-        content_type,
         file_bytes.to_vec(),
     )
     .await?;
@@ -812,12 +810,7 @@ fn build_attachment_map(
 }
 
 /// Upload data to storage (KV or R2 based on configured backend)
-pub(crate) async fn upload_to_storage(
-    env: &Env,
-    key: &str,
-    _content_type: Option<String>,
-    data: Vec<u8>,
-) -> Result<(), AppError> {
+pub(crate) async fn upload_to_storage(env: &Env, key: &str, data: Vec<u8>) -> Result<(), AppError> {
     match get_storage_backend(env) {
         Some(StorageBackend::KV) => {
             let kv = env.kv(ATTACHMENTS_KV).map_err(|_| AppError::Internal)?;
@@ -837,14 +830,11 @@ pub(crate) async fn upload_to_storage(
             let bucket = env
                 .bucket(ATTACHMENTS_BUCKET)
                 .map_err(|_| AppError::Internal)?;
-            let mut builder = bucket.put(key, data);
-            if let Some(ct) = _content_type {
-                builder = builder.http_metadata(HttpMetadata {
-                    content_type: Some(ct),
-                    ..Default::default()
-                });
-            }
-            builder.execute().await.map_err(AppError::Worker)?;
+            bucket
+                .put(key, data)
+                .execute()
+                .await
+                .map_err(AppError::Worker)?;
             Ok(())
         }
         None => Err(AppError::BadRequest(
@@ -855,9 +845,8 @@ pub(crate) async fn upload_to_storage(
 
 async fn read_multipart(
     multipart: &mut Multipart,
-) -> Result<(Bytes, Option<String>, Option<String>, Option<String>), AppError> {
+) -> Result<(Bytes, Option<String>, Option<String>), AppError> {
     let mut file_bytes: Option<Bytes> = None;
-    let mut content_type: Option<String> = None;
     let mut key: Option<String> = None;
     let mut file_name: Option<String> = None;
 
@@ -868,7 +857,6 @@ async fn read_multipart(
     {
         match field.name() {
             Some("data") => {
-                content_type = field.content_type().map(|s| s.to_string());
                 file_name = field.file_name().map(|s| s.to_string());
                 file_bytes =
                     Some(field.bytes().await.map_err(|_| {
@@ -890,7 +878,7 @@ async fn read_multipart(
     let file_bytes = file_bytes
         .ok_or_else(|| AppError::BadRequest("No attachment data provided".to_string()))?;
 
-    Ok((file_bytes, content_type, key, file_name))
+    Ok((file_bytes, key, file_name))
 }
 
 fn build_upload_download_token(

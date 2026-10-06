@@ -618,13 +618,13 @@ async fn validate_folder_for_user(
     folder_id: Option<&str>,
     user_id: &str,
 ) -> Result<(), AppError> {
-    let Some(folder_id) = folder_id else {
+    let Some(folder_id) = folder_id.filter(|folder_id| !folder_id.is_empty()) else {
         return Ok(());
     };
 
-    let folder_exists: Option<serde_json::Value> = db
+    let folder_exists: Option<Value> = db
         .prepare("SELECT id FROM folders WHERE id = ?1 AND user_id = ?2")
-        .bind(&[folder_id.into(), user_id.into()])?
+        .bind(&[folder_id.to_string().into(), user_id.to_string().into()])?
         .first(None)
         .await?;
 
@@ -788,20 +788,7 @@ pub async fn update_cipher(
         }
     }
 
-    // Validate folder ownership if provided
-    if let Some(ref folder_id) = payload.folder_id {
-        let folder_exists: Option<serde_json::Value> = db
-            .prepare("SELECT id FROM folders WHERE id = ?1 AND user_id = ?2")
-            .bind(&[folder_id.clone().into(), claims.sub.clone().into()])?
-            .first(None)
-            .await?;
-
-        if folder_exists.is_none() {
-            return Err(AppError::BadRequest(
-                "Invalid folder: Folder does not exist or belongs to another user".to_string(),
-            ));
-        }
-    }
+    validate_folder_for_user(&db, payload.folder_id.as_deref(), &claims.sub).await?;
 
     reject_stale_revision(
         payload.last_known_revision_date.as_deref(),
@@ -1296,20 +1283,7 @@ pub async fn update_cipher_partial(
         ));
     }
 
-    // Validate folder ownership if provided
-    if let Some(ref folder_id) = payload.folder_id {
-        let folder_exists: Option<serde_json::Value> = db
-            .prepare("SELECT id FROM folders WHERE id = ?1 AND user_id = ?2")
-            .bind(&[folder_id.clone().into(), user_id.clone().into()])?
-            .first(None)
-            .await?;
-
-        if folder_exists.is_none() {
-            return Err(AppError::BadRequest(
-                "Invalid folder: Folder does not exist or belongs to another user".to_string(),
-            ));
-        }
-    }
+    validate_folder_for_user(&db, payload.folder_id.as_deref(), user_id).await?;
 
     let now = db::now_string();
 
@@ -2217,6 +2191,9 @@ fn cipher_json_expr(attachments_enabled: bool, include_access_fields: bool) -> S
             'card', CASE WHEN c.type = 3 THEN json_extract(c.data, '$.card') ELSE NULL END,
             'identity', CASE WHEN c.type = 4 THEN json_extract(c.data, '$.identity') ELSE NULL END,
             'sshKey', CASE WHEN c.type = 5 THEN json_extract(c.data, '$.sshKey') ELSE NULL END,
+            'bankAccount', CASE WHEN c.type = 6 THEN json_extract(c.data, '$.bankAccount') ELSE NULL END,
+            'driversLicense', CASE WHEN c.type = 7 THEN json_extract(c.data, '$.driversLicense') ELSE NULL END,
+            'passport', CASE WHEN c.type = 8 THEN json_extract(c.data, '$.passport') ELSE NULL END,
             'key', json_extract(c.data, '$.key')
         )",
         attachments_expr = attachments_expr,

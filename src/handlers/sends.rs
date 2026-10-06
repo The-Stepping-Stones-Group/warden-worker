@@ -16,14 +16,13 @@ use worker::Env;
 use crate::d1_query;
 
 use crate::{
-    auth::{Claims, JWT_VALIDATION_LEEWAY_SECS},
-    client_context::request_ip_from_headers,
+    auth::{send::SendAccessClaims, Claims, JWT_VALIDATION_LEEWAY_SECS},
     db,
     error::AppError,
     handlers::attachments::{
         attachments_enabled, delete_storage_objects, is_kv_backend, upload_to_storage,
     },
-    handlers::get_env_usize,
+    handlers::{enforce_ip_rate_limit, get_env_usize},
     models::attachment::display_size,
     models::send::{validate_send_dates, SendDB, SendRequestData, SendType, SEND_INACCESSIBLE_MSG},
     notifications::{self, UpdateType},
@@ -173,6 +172,8 @@ fn build_send(
     deletion_date: String,
     expiration_date: Option<String>,
 ) -> Result<SendDB, AppError> {
+    ensure_email_verification_is_not_requested(payload)?;
+
     let mut send = SendDB::new(
         user_id,
         payload.send_type,
@@ -190,6 +191,16 @@ fn build_send(
     send.disabled = payload.disabled.unwrap_or(false) as i32;
     send.hide_email = payload.hide_email.unwrap_or(false) as i32;
     Ok(send)
+}
+
+fn ensure_email_verification_is_not_requested(payload: &SendRequestData) -> Result<(), AppError> {
+    if matches!(payload.emails.as_deref(), Some(emails) if !emails.is_empty()) {
+        return Err(AppError::BadRequest(
+            "Sends with email verification is not supported".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Apply mutable fields from request to an existing send (for update).
@@ -229,24 +240,6 @@ async fn resolve_creator_identifier(db: &crate::db::Db, send: &SendDB) -> Option
         .ok()
         .flatten()
         .map(|r| r.email)
-}
-
-fn send_password_rate_limit_key(send_id: &str, ip: &str) -> String {
-    format!("send-password:{send_id}:{ip}")
-}
-
-async fn enforce_rate_limit(env: &Env, key: String) -> Result<(), AppError> {
-    if let Ok(rate_limiter) = env.rate_limiter("LOGIN_RATE_LIMITER") {
-        if let Ok(outcome) = rate_limiter.limit(key).await {
-            if !outcome.success {
-                return Err(AppError::TooManyRequests(
-                    "Too many requests. Please try again later.".to_string(),
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 // ── GET /api/sends ──────────────────────────────────────────────────
@@ -425,7 +418,6 @@ pub async fn create_file_send_legacy(
 
     let mut model_json: Option<String> = None;
     let mut file_bytes: Option<Bytes> = None;
-    let mut content_type: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -442,7 +434,6 @@ pub async fn create_file_send_legacy(
                 );
             }
             Some("data") | Some("file") => {
-                content_type = field.content_type().map(|s| s.to_string());
                 file_bytes = Some(
                     field
                         .bytes()
@@ -497,7 +488,7 @@ pub async fn create_file_send_legacy(
     send.set_password(payload.password.as_deref()).await?;
 
     let storage_key = format!("sends/{}/{file_id}", send.id);
-    upload_to_storage(&env, &storage_key, content_type, file_bytes.to_vec()).await?;
+    upload_to_storage(&env, &storage_key, file_bytes.to_vec()).await?;
 
     send.insert(&db).await?;
     db::touch_user_updated_at(&db, &claims.sub, &send.updated_at).await?;
@@ -542,7 +533,6 @@ pub async fn upload_file_send_direct(
     }
 
     let mut file_bytes: Option<Bytes> = None;
-    let mut content_type: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -550,7 +540,6 @@ pub async fn upload_file_send_direct(
         .map_err(|_| AppError::BadRequest("Invalid multipart data".into()))?
     {
         if field.name() == Some("data") || field.name() == Some("file") {
-            content_type = field.content_type().map(|s| s.to_string());
             file_bytes = Some(
                 field
                     .bytes()
@@ -575,7 +564,7 @@ pub async fn upload_file_send_direct(
     }
 
     let storage_key = pending.storage_key().ok_or_else(|| AppError::Internal)?;
-    upload_to_storage(&env, &storage_key, content_type, file_bytes.to_vec()).await?;
+    upload_to_storage(&env, &storage_key, file_bytes.to_vec()).await?;
 
     pending.finalize(&db).await?;
     db::touch_user_updated_at(&db, &claims.sub, &pending.updated_at).await?;
@@ -601,6 +590,8 @@ pub async fn update_send(
     Path(send_id): Path<String>,
     Json(payload): Json<SendRequestData>,
 ) -> Result<Json<Value>, AppError> {
+    ensure_email_verification_is_not_requested(&payload)?;
+
     let (del, exp) =
         validate_send_dates(&payload.deletion_date, payload.expiration_date.as_deref())?;
 
@@ -718,6 +709,87 @@ pub struct SendAccessRequest {
     pub password: Option<String>,
 }
 
+async fn publish_send_access(
+    env: &Arc<Env>,
+    db: &crate::db::Db,
+    send: &SendDB,
+) -> Result<(), AppError> {
+    db::touch_user_updated_at(db, &send.user_id, &send.updated_at).await?;
+    notifications::publish_send_update(
+        (**env).clone(),
+        send.user_id.clone(),
+        UpdateType::SyncSendUpdate,
+        send.id.clone(),
+        send.updated_at.clone(),
+        None,
+    );
+    Ok(())
+}
+
+async fn send_access_response(
+    env: &Arc<Env>,
+    db: &crate::db::Db,
+    send: &SendDB,
+) -> Result<Json<Value>, AppError> {
+    publish_send_access(env, db, send).await?;
+    let creator_id = resolve_creator_identifier(db, send).await;
+    Ok(Json(send.to_access_json(creator_id.as_deref())))
+}
+
+async fn send_file_download_response(
+    env: &Arc<Env>,
+    db: &crate::db::Db,
+    send: &SendDB,
+    file_id: &str,
+    base_url: &str,
+) -> Result<Json<Value>, AppError> {
+    publish_send_access(env, db, send).await?;
+
+    let token = build_download_token(env, &send.id, file_id)?;
+    let url = format!("{base_url}/api/sends/{}/{file_id}?t={token}", send.id);
+
+    Ok(Json(serde_json::json!({
+        "id": file_id,
+        "url": url,
+        "object": "send-fileDownload",
+    })))
+}
+
+async fn find_send_for_access_token(
+    db: &crate::db::Db,
+    claims: &SendAccessClaims,
+) -> Result<SendDB, AppError> {
+    SendDB::find_by_id(db, &claims.sub)
+        .await?
+        .ok_or_else(|| AppError::NotFound(SEND_INACCESSIBLE_MSG.into()))
+}
+
+// ── POST /api/sends/access (Bearer Send access token) ──────────────
+
+#[worker::send]
+pub async fn access_send_with_token(
+    send_access_claims: SendAccessClaims,
+    State(env): State<Arc<Env>>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let send = find_send_for_access_token(&db, &send_access_claims).await?;
+    send_access_response(&env, &db, &send).await
+}
+
+// ── POST /api/sends/access/file/{file_id} (Bearer Send access token) ─
+
+#[worker::send]
+pub async fn access_file_send_with_token(
+    send_access_claims: SendAccessClaims,
+    State(env): State<Arc<Env>>,
+    Path(file_id): Path<String>,
+    Extension(BaseUrl(base_url)): Extension<BaseUrl>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let send = find_send_for_access_token(&db, &send_access_claims).await?;
+    send_file_download_response(&env, &db, &send, &file_id, &base_url).await
+}
+
 #[worker::send]
 pub async fn access_send(
     State(env): State<Arc<Env>>,
@@ -733,9 +805,12 @@ pub async fn access_send(
     send.validate_access()?;
 
     if send.has_password() {
-        enforce_rate_limit(
+        enforce_ip_rate_limit(
             &env,
-            send_password_rate_limit_key(&send.id, &request_ip_from_headers(&headers)),
+            &headers,
+            "SEND_ACCESS_RATE_LIMITER",
+            "send-access",
+            "Too many send password attempts. Please try again later.",
         )
         .await?;
 
@@ -756,20 +831,7 @@ pub async fn access_send(
         send.update(&db).await?;
     }
 
-    db::touch_user_updated_at(&db, &send.user_id, &send.updated_at).await?;
-
-    let creator_id = resolve_creator_identifier(&db, &send).await;
-    let response = send.to_access_json(creator_id.as_deref());
-    notifications::publish_send_update(
-        (*env).clone(),
-        send.user_id,
-        UpdateType::SyncSendUpdate,
-        send.id,
-        send.updated_at,
-        None,
-    );
-
-    Ok(Json(response))
+    send_access_response(&env, &db, &send).await
 }
 
 // ── POST /api/sends/{send_id}/access/file/{file_id} (anonymous file) ─
@@ -783,7 +845,7 @@ pub async fn access_file_send(
     Json(payload): Json<SendAccessRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
-    let send = SendDB::find_by_id(&db, &send_id)
+    let mut send = SendDB::find_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound(SEND_INACCESSIBLE_MSG.into()))?;
 
@@ -797,9 +859,12 @@ pub async fn access_file_send(
     }
 
     if send.has_password() {
-        enforce_rate_limit(
+        enforce_ip_rate_limit(
             &env,
-            send_password_rate_limit_key(&send.id, &request_ip_from_headers(&headers)),
+            &headers,
+            "SEND_ACCESS_RATE_LIMITER",
+            "send-access",
+            "Too many send password attempts. Please try again later.",
         )
         .await?;
 
@@ -812,14 +877,8 @@ pub async fn access_file_send(
         }
     }
 
-    let token = build_download_token(&env, &send_id, &file_id)?;
-    let url = format!("{base_url}/api/sends/{send_id}/{file_id}?t={token}");
-
-    Ok(Json(serde_json::json!({
-        "id": file_id,
-        "url": url,
-        "object": "send-fileDownload",
-    })))
+    send.increment_access_count(&db).await?;
+    send_file_download_response(&env, &db, &send, &file_id, &base_url).await
 }
 
 // ── Key rotation support ────────────────────────────────────────────
@@ -832,6 +891,10 @@ pub async fn rotate_user_sends(
     now: &str,
     batch_size: usize,
 ) -> Result<(), AppError> {
+    for send_data in sends {
+        ensure_email_verification_is_not_requested(send_data)?;
+    }
+
     let db_sends = SendDB::find_by_user(db, user_id).await?;
 
     let db_ids: std::collections::HashSet<&str> = db_sends.iter().map(|s| s.id.as_str()).collect();

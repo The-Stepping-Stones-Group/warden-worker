@@ -1,7 +1,7 @@
 use jwt_compact::{alg::Hs256Key, AlgorithmExt, UntrustedToken};
 use serde::{Deserialize, Serialize};
 use web_sys::ReadableStream;
-use worker::{Env, Headers, HttpMetadata, Method, Request, Response, Url};
+use worker::{Env, Headers, Method, Request, Response, Url};
 
 use crate::{
     auth::jwt_time_options,
@@ -17,13 +17,14 @@ use crate::{
 
 const ATTACHMENTS_BUCKET: &str = "ATTACHMENTS_BUCKET";
 const ATTACHMENTS_KV: &str = "ATTACHMENTS_KV";
+const DOWNLOAD_CONTENT_TYPE: &str = "application/octet-stream";
+const DOWNLOAD_CONTENT_DISPOSITION: &str = "attachment";
+const X_CONTENT_TYPE_OPTIONS: &str = "nosniff";
 
 // ── KV metadata ─────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 struct KvFileMetadata {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
     file_size: i64,
 }
 
@@ -138,18 +139,9 @@ async fn handle_attachment_upload(
     }
 
     let body_stream = request_body(&req)?;
-    let content_type = req.headers().get("content-type").ok().flatten();
 
     let storage_key = format!("{cipher_id}/{attachment_id}");
-    put_stream_to_storage(
-        env,
-        backend,
-        &storage_key,
-        body_stream,
-        content_type.as_deref(),
-        declared_size,
-    )
-    .await?;
+    put_stream_to_storage(env, backend, &storage_key, body_stream, declared_size).await?;
 
     let mut pending = pending;
     let now = pending.finalize_pending(&db).await?;
@@ -249,18 +241,9 @@ async fn handle_send_upload(
     }
 
     let body_stream = request_body(&req)?;
-    let content_type = req.headers().get("content-type").ok().flatten();
 
     let storage_key = format!("sends/{send_id}/{file_id}");
-    put_stream_to_storage(
-        env,
-        backend,
-        &storage_key,
-        body_stream,
-        content_type.as_deref(),
-        declared_size,
-    )
-    .await?;
+    put_stream_to_storage(env, backend, &storage_key, body_stream, declared_size).await?;
 
     let mut pending = pending;
     pending.data = serde_json::to_string(&pending_data).map_err(|_| AppError::Internal)?;
@@ -342,7 +325,6 @@ async fn put_stream_to_storage(
     backend: StorageBackend,
     key: &str,
     body: ReadableStream,
-    content_type: Option<&str>,
     declared_size: i64,
 ) -> Result<(), AppError> {
     match backend {
@@ -350,14 +332,7 @@ async fn put_stream_to_storage(
             let bucket = env
                 .bucket(ATTACHMENTS_BUCKET)
                 .map_err(|_| AppError::Internal)?;
-            let mut builder = bucket.put(key, body);
-            if let Some(ct) = content_type {
-                builder = builder.http_metadata(HttpMetadata {
-                    content_type: Some(ct.to_string()),
-                    ..Default::default()
-                });
-            }
-            let r2_obj = builder.execute().await.map_err(|e| {
+            let r2_obj = bucket.put(key, body).execute().await.map_err(|e| {
                 log::error!("R2 upload failed for key '{key}': {e}");
                 AppError::Internal
             })?;
@@ -377,7 +352,6 @@ async fn put_stream_to_storage(
         StorageBackend::KV => {
             let kv = env.kv(ATTACHMENTS_KV).map_err(|_| AppError::Internal)?;
             let meta = KvFileMetadata {
-                content_type: content_type.map(|s| s.to_string()),
                 file_size: declared_size,
             };
             kv.put_stream(key, body)
@@ -426,9 +400,8 @@ async fn stream_download_from_storage(
                 .response_body()
                 .map_err(AppError::Worker)?;
 
-            let stored_ct = obj.http_metadata().content_type;
             let mut builder = Response::builder().with_status(200);
-            for (name, value) in safe_download_headers(stored_ct.as_deref(), Some(size as i64)) {
+            for (name, value) in safe_download_headers(None, Some(size as i64)) {
                 builder = builder.with_header(name, &value)?;
             }
             let resp = builder.body(body);
@@ -447,14 +420,10 @@ async fn stream_download_from_storage(
 
             let stream = stream.ok_or_else(|| AppError::NotFound("Not found in storage".into()))?;
 
-            let stored_ct = metadata
-                .as_ref()
-                .and_then(|m| m.content_type.clone())
-                .unwrap_or_else(|| "application/octet-stream".into());
             let size = metadata.as_ref().map(|m| m.file_size).or(fallback_size);
 
             let mut builder = Response::builder().with_status(200);
-            for (name, value) in safe_download_headers(Some(&stored_ct), size) {
+            for (name, value) in safe_download_headers(None, size) {
                 builder = builder.with_header(name, &value)?;
             }
             let resp = builder.stream(stream);
@@ -513,7 +482,7 @@ fn parse_content_length(headers: &Headers) -> Result<i64, AppError> {
 }
 
 fn safe_download_content_type(_stored_content_type: Option<&str>) -> &'static str {
-    "application/octet-stream"
+    DOWNLOAD_CONTENT_TYPE
 }
 
 fn safe_download_headers(
@@ -525,8 +494,11 @@ fn safe_download_headers(
             "content-type",
             safe_download_content_type(stored_content_type).to_string(),
         ),
-        ("x-content-type-options", "nosniff".to_string()),
-        ("content-disposition", "attachment".to_string()),
+        ("x-content-type-options", X_CONTENT_TYPE_OPTIONS.to_string()),
+        (
+            "content-disposition",
+            DOWNLOAD_CONTENT_DISPOSITION.to_string(),
+        ),
     ];
 
     if let Some(size) = content_length {
